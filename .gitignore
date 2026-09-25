@@ -1,0 +1,73 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Production & Build outputs
+dist/
+build/
+out/
+bin/
+
+# Expo & React Native
+.expo/
+.expo-shared/
+web-build/
+*.orig.*
+.metro/
+metro-cache/
+
+# Android & iOS build artifacts (if prebuilt)
+android/.gradle/
+android/app/build/
+android/build/
+ios/Pods/
+ios/build/
+ios/*.xcworkspace
+*.ipa
+*.apk
+*.aab
+
+# TypeScript
+*.tsbuildinfo
+
+# Logs & Diagnostics
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.env
+
+# Testing & Coverage
+coverage/
+.nyc_output/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# IDE & Editor caches
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Temporary / Scratch
+tmp/
+temp/
+.cache/
