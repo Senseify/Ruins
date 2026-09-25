@@ -125,7 +125,7 @@ export interface DatabaseStore {
   updatePlayerReady(gameId: string, userId: string, isReady: boolean): Promise<void>;
   updatePlayerTeam(gameId: string, userId: string, teamIndex: number): Promise<void>;
   updatePlayerScore(gameId: string, userId: string, pointsDelta: number): Promise<void>;
-  updatePlayerTelemetry(gameId: string, userId: string, lat: number, lng: number, distanceDelta: number): Promise<void>;
+  updatePlayerTelemetry(gameId: string, userId: string, lat: number, lng: number, distanceDelta: number, telemetryAt?: Date): Promise<void>;
   removePlayerFromGame(gameId: string, userId: string): Promise<void>;
 
   // Objectives
@@ -159,10 +159,13 @@ export interface DatabaseStore {
   // Phase 10: Anti-Cheat & Auditing
   logAntiCheatIncident(record: Omit<AntiCheatLogRecord, 'id' | 'createdAt'>): Promise<void>;
   recordEvent(gameId: string, eventType: string, payload: Record<string, any>, userId?: string): Promise<void>;
+
+  // Lifecycle & Connectivity
+  verifyConnection(): Promise<void>;
 }
 
 // In-Memory Spatial & Relational Engine (Development & Tests)
-class MemoryDatabaseStore implements DatabaseStore {
+export class MemoryDatabaseStore implements DatabaseStore {
   private users: Map<string, UserRecord> = new Map();
   private games: Map<string, GameRecord> = new Map();
   private players: Map<string, GamePlayerRecord[]> = new Map();
@@ -173,6 +176,10 @@ class MemoryDatabaseStore implements DatabaseStore {
   private friends: Map<string, FriendRelationship[]> = new Map();
   private ugcGames: Map<string, UGCGameConfig> = new Map();
   private antiCheatLogs: AntiCheatLogRecord[] = [];
+
+  async verifyConnection(): Promise<void> {
+    return Promise.resolve();
+  }
 
   async createUser(data: Omit<UserRecord, 'id' | 'createdAt' | 'updatedAt'>): Promise<UserRecord> {
     const id = crypto.randomUUID();
@@ -359,7 +366,8 @@ class MemoryDatabaseStore implements DatabaseStore {
     userId: string,
     lat: number,
     lng: number,
-    distanceDelta: number
+    distanceDelta: number,
+    telemetryAt?: Date
   ): Promise<void> {
     const list = this.players.get(gameId) || [];
     const player = list.find((p) => p.userId === userId);
@@ -367,7 +375,7 @@ class MemoryDatabaseStore implements DatabaseStore {
       player.lastKnownLat = lat;
       player.lastKnownLng = lng;
       player.distanceTraveledMeters += distanceDelta;
-      player.lastTelemetryAt = new Date();
+      player.lastTelemetryAt = telemetryAt || new Date();
     }
   }
 
@@ -695,6 +703,15 @@ export class PostgresDatabaseStore implements DatabaseStore {
     await this.pool.end();
   }
 
+  async verifyConnection(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('SELECT 1');
+    } finally {
+      client.release();
+    }
+  }
+
   async createUser(data: Omit<UserRecord, 'id' | 'createdAt' | 'updatedAt'>): Promise<UserRecord> {
     const res = await this.pool.query(
       `INSERT INTO users (username, display_name, email, password_hash, xp, level, games_played, wins, total_score)
@@ -980,16 +997,18 @@ export class PostgresDatabaseStore implements DatabaseStore {
     userId: string,
     lat: number,
     lng: number,
-    distanceDelta: number
+    distanceDelta: number,
+    telemetryAt?: Date
   ): Promise<void> {
+    const timestamp = telemetryAt || new Date();
     await this.pool.query(
       `UPDATE game_players
        SET last_known_lat = $1,
            last_known_lng = $2,
            distance_traveled_meters = distance_traveled_meters + $3,
-           last_telemetry_at = NOW()
-       WHERE game_id = $4 AND user_id = $5`,
-      [lat, lng, distanceDelta, gameId, userId]
+           last_telemetry_at = $4
+       WHERE game_id = $5 AND user_id = $6`,
+      [lat, lng, distanceDelta, timestamp, gameId, userId]
     );
   }
 
@@ -1554,10 +1573,40 @@ export class PostgresDatabaseStore implements DatabaseStore {
   }
 }
 
-// Global active store instance: Production strictly uses PostgreSQL; Development uses MemoryDatabaseStore unless explicitly configured
-export const db: DatabaseStore = config.isProduction
-  ? new PostgresDatabaseStore()
-  : (process.env.USE_POSTGRES === 'true'
-    ? new PostgresDatabaseStore()
-    : new MemoryDatabaseStore());
+/**
+ * Factory function for creating a database store instance.
+ * Enforces production rules:
+ * - Production strictly requires DATABASE_URL
+ * - Production strictly connects to PostgreSQL
+ * - Production must NEVER silently downgrade to memory store
+ */
+export function createDatabaseStore(options?: {
+  isProduction?: boolean;
+  usePostgres?: boolean;
+  databaseUrl?: string;
+}): DatabaseStore {
+  const isProd = options?.isProduction !== undefined ? options.isProduction : config.isProduction;
+  const usePg = options?.usePostgres !== undefined ? options.usePostgres : (process.env.USE_POSTGRES === 'true');
+  const dbUrl = options?.databaseUrl !== undefined ? options.databaseUrl : config.databaseUrl;
+
+  if (isProd) {
+    if (!dbUrl || dbUrl.trim() === '') {
+      throw new Error(
+        '[FATAL CONFIG ERROR] DATABASE_URL environment variable is required in production mode. ' +
+          'Production must never silently downgrade to in-memory infrastructure.'
+      );
+    }
+    return new PostgresDatabaseStore(dbUrl);
+  }
+
+  if (usePg) {
+    return new PostgresDatabaseStore(dbUrl);
+  }
+
+  return new MemoryDatabaseStore();
+}
+
+// Global active store instance
+export const db: DatabaseStore = createDatabaseStore();
+
 

@@ -2,6 +2,7 @@ import assert from 'assert';
 import { WebSocket } from 'ws';
 import { startServer, server } from '../src/index';
 import { config } from '../src/config';
+import { createDatabaseStore, PostgresDatabaseStore, MemoryDatabaseStore } from '../src/db';
 
 async function runTests() {
   console.log('[E2E Test] Starting backend verification suite...');
@@ -256,6 +257,7 @@ async function runTests() {
         latitude: targetObj.latitude + 0.00002, // ~2.2 meters away
         longitude: targetObj.longitude,
         accuracy: 3,
+        timestamp: Date.now() - 40000,
       }),
     });
     assert.strictEqual(validCaptureRes.status, 200, 'Valid proximity capture must succeed');
@@ -284,25 +286,40 @@ async function runTests() {
     // -------------------------------------------------------------
     // Capture remaining objectives in CONVERGENCE match to trigger automatic conclusion
     const remainingObjectives = createGameJson.objectives.slice(1);
-    let simTime = Date.now() + 20000;
-    for (const obj of remainingObjectives) {
-      simTime += 30000; // Realistic tactical traversal time between nodes (30 seconds)
-      const capRes = await fetch(`${baseUrl}/api/games/${gameId}/capture`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${runnerAuth.token}`,
-        },
-        body: JSON.stringify({
-          objectiveId: obj.id,
-          latitude: obj.latitude,
-          longitude: obj.longitude,
-          accuracy: 2,
-          timestamp: simTime,
-        }),
-      });
-      assert.strictEqual(capRes.status, 200);
-    }
+
+    // Obj 1 captured by Host
+    const capHostRes = await fetch(`${baseUrl}/api/games/${gameId}/capture`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hostAuth.token}`,
+      },
+      body: JSON.stringify({
+        objectiveId: remainingObjectives[0].id,
+        latitude: remainingObjectives[0].latitude,
+        longitude: remainingObjectives[0].longitude,
+        accuracy: 2,
+        timestamp: Date.now() - 20000,
+      }),
+    });
+    assert.strictEqual(capHostRes.status, 200);
+
+    // Obj 2 captured by Runner with realistic elapsed traversal time (35s after Obj 0)
+    const capRunnerRes = await fetch(`${baseUrl}/api/games/${gameId}/capture`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${runnerAuth.token}`,
+      },
+      body: JSON.stringify({
+        objectiveId: remainingObjectives[1].id,
+        latitude: remainingObjectives[1].latitude,
+        longitude: remainingObjectives[1].longitude,
+        accuracy: 2,
+        timestamp: Date.now() - 5000,
+      }),
+    });
+    assert.strictEqual(capRunnerRes.status, 200);
 
     // Match should now be COMPLETED and results finalized
     const resultsRes = await fetch(`${baseUrl}/api/games/${gameId}/results`, {
@@ -613,6 +630,319 @@ async function runTests() {
     const hasRateLimit = healthCheckRes.headers.get('x-ratelimit-limit') !== null || healthCheckRes.headers.get('ratelimit-limit') !== null;
     assert.ok(hasRateLimit, 'Rate limiting headers must be present');
     console.log('✓ Phase 17: Production liveness, readiness, and security header hooks passed');
+
+    // -------------------------------------------------------------
+    // TEST 17: Production Database Selection Rule & Fail-Fast
+    // -------------------------------------------------------------
+    // 1. Missing DATABASE_URL in production MUST throw fatal error
+    assert.throws(
+      () => {
+        createDatabaseStore({ isProduction: true, databaseUrl: '' });
+      },
+      /DATABASE_URL.*required in production/i,
+      'Production mode without DATABASE_URL must immediately throw fatal error'
+    );
+
+    // 2. Production mode MUST strictly instantiate PostgresDatabaseStore (never MemoryDatabaseStore)
+    const prodPgStore = createDatabaseStore({
+      isProduction: true,
+      databaseUrl: 'postgresql://invalid_host:5432/ruins_test',
+    });
+    assert.ok(
+      prodPgStore instanceof PostgresDatabaseStore,
+      'Production store must strictly be an instance of PostgresDatabaseStore'
+    );
+    assert.ok(
+      !(prodPgStore instanceof MemoryDatabaseStore),
+      'Production store must never silently downgrade to MemoryDatabaseStore'
+    );
+
+    // 3. verifyConnection() on unreachable database must reject/throw
+    let connRejected = false;
+    try {
+      await prodPgStore.verifyConnection();
+    } catch {
+      connRejected = true;
+    }
+    assert.ok(connRejected, 'Unreachable PostgreSQL instance must cause verifyConnection to reject and fail startup');
+    await (prodPgStore as PostgresDatabaseStore).close().catch(() => {});
+    console.log('✓ Production Database Selection & Fail-Fast Verification passed');
+
+    // -------------------------------------------------------------
+    // TEST 18: WebSocket Security — Unauthorized Cross-Game Room Subscription
+    // -------------------------------------------------------------
+    const regIntruderRes = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: 'IntruderAgent',
+        email: 'intruder@ruins.network',
+        password: 'Password123!',
+      }),
+    });
+    const intruderAuth = await regIntruderRes.json();
+
+    const intruderWs = new WebSocket(wsUrl);
+    await new Promise<void>((resolve, reject) => {
+      intruderWs.on('open', resolve);
+      intruderWs.on('error', reject);
+    });
+
+    intruderWs.send(JSON.stringify({ type: 'AUTH', payload: { token: intruderAuth.token } }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    let forbiddenReceived = false;
+    intruderWs.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === 'ERROR' && msg.message?.includes('FORBIDDEN')) {
+        forbiddenReceived = true;
+      }
+    });
+
+    intruderWs.send(JSON.stringify({ type: 'JOIN_MATCH', payload: { gameId } }));
+    await new Promise((r) => setTimeout(r, 200));
+    assert.ok(forbiddenReceived, 'Intruder must be rejected from subscribing to an un-enrolled match room');
+    intruderWs.close();
+    console.log('✓ WebSocket cross-game unauthorized subscription isolation passed');
+
+    // -------------------------------------------------------------
+    // TEST 19: Gameplay Authoritative Audit — Forged Payloads & Host Actions
+    // -------------------------------------------------------------
+    const auditGameRes = await fetch(`${baseUrl}/api/games`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hostAuth.token}`,
+      },
+      body: JSON.stringify({
+        title: 'AUDIT OPERATION',
+        centerLat: 37.7749,
+        centerLng: -122.4194,
+        boundaryRadiusMeters: 400,
+        durationMinutes: 15,
+      }),
+    });
+    const auditGameJson = await auditGameRes.json();
+    const auditGameId = auditGameJson.game.id;
+    const auditObjId = auditGameJson.objectives[0].id;
+
+    // Start game so status is ACTIVE
+    await fetch(`${baseUrl}/api/games/${auditGameId}/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${hostAuth.token}` },
+    });
+
+    const forgeCaptureRes = await fetch(`${baseUrl}/api/games/${auditGameId}/capture`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${intruderAuth.token}`,
+      },
+      body: JSON.stringify({
+        objectiveId: auditObjId,
+        latitude: 37.7749,
+        longitude: -122.4194,
+      }),
+    });
+    assert.strictEqual(forgeCaptureRes.status, 403, 'Unenrolled operative must be rejected with 403');
+
+    const nanCoordRes = await fetch(`${baseUrl}/api/games/${auditGameId}/capture`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hostAuth.token}`,
+      },
+      body: JSON.stringify({
+        objectiveId: auditObjId,
+        latitude: NaN,
+        longitude: -122.4194,
+      }),
+    });
+    assert.strictEqual(nanCoordRes.status, 400, 'NaN coordinates must be rejected with 400');
+
+    const outOfRangeCoordRes = await fetch(`${baseUrl}/api/games/${auditGameId}/capture`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hostAuth.token}`,
+      },
+      body: JSON.stringify({
+        objectiveId: auditObjId,
+        latitude: 95.0,
+        longitude: -122.4194,
+      }),
+    });
+    assert.strictEqual(outOfRangeCoordRes.status, 400, 'Out-of-range latitude must be rejected with 400');
+    console.log('✓ Gameplay authoritative audit & forged payload rejection passed');
+
+    // -------------------------------------------------------------
+    // TEST 20: Anti-Cheat & GPS Telemetry Sanity
+    // -------------------------------------------------------------
+    const futureTimeRes = await fetch(`${baseUrl}/api/games/${auditGameId}/capture`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hostAuth.token}`,
+      },
+      body: JSON.stringify({
+        objectiveId: auditObjId,
+        latitude: 37.7749,
+        longitude: -122.4194,
+        timestamp: Date.now() + 60000,
+      }),
+    });
+    assert.strictEqual(futureTimeRes.status, 400, 'Future timestamp must be rejected with 400');
+
+    const staleTimeRes = await fetch(`${baseUrl}/api/games/${auditGameId}/capture`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hostAuth.token}`,
+      },
+      body: JSON.stringify({
+        objectiveId: auditObjId,
+        latitude: 37.7749,
+        longitude: -122.4194,
+        timestamp: Date.now() - 120000,
+      }),
+    });
+    assert.strictEqual(staleTimeRes.status, 400, 'Stale timestamp must be rejected with 400');
+
+    const extremeAccRes = await fetch(`${baseUrl}/api/games/${auditGameId}/capture`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hostAuth.token}`,
+      },
+      body: JSON.stringify({
+        objectiveId: auditObjId,
+        latitude: 37.7749,
+        longitude: -122.4194,
+        accuracy: 500,
+      }),
+    });
+    assert.strictEqual(extremeAccRes.status, 400, 'Extreme GPS inaccuracy must be rejected with 400');
+    console.log('✓ Anti-cheat & telemetry temporal/accuracy sanity checks passed');
+
+    // -------------------------------------------------------------
+    // TEST 21: UGC Safety & Stacking Auditing
+    // -------------------------------------------------------------
+    const stackedUgcRes = await fetch(`${baseUrl}/api/ugc/games`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hostAuth.token}`,
+      },
+      body: JSON.stringify({
+        title: 'STACKED THEATER',
+        boundaryLat: 37.7749,
+        boundaryLng: -122.4194,
+        boundaryRadiusMeters: 500,
+        objectives: [
+          { code: 'OBJ 01', latitude: 37.7749, longitude: -122.4194 },
+          { code: 'OBJ 02', latitude: 37.7749001, longitude: -122.4194001 },
+        ],
+      }),
+    });
+    assert.strictEqual(stackedUgcRes.status, 400, 'Stacked objectives (<15m) must be rejected with 400');
+    const stackedJson = await stackedUgcRes.json();
+    assert.ok(stackedJson.error.includes('minimum spacing'), 'Error must specify minimum spacing violation');
+
+    const dupCodeUgcRes = await fetch(`${baseUrl}/api/ugc/games`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hostAuth.token}`,
+      },
+      body: JSON.stringify({
+        title: 'DUP CODE THEATER',
+        boundaryLat: 37.7749,
+        boundaryLng: -122.4194,
+        boundaryRadiusMeters: 500,
+        objectives: [
+          { code: 'OBJ 01', latitude: 37.7749, longitude: -122.4194 },
+          { code: 'OBJ 01', latitude: 37.7755, longitude: -122.4194 },
+        ],
+      }),
+    });
+    assert.strictEqual(dupCodeUgcRes.status, 400, 'Duplicate objective code must be rejected with 400');
+    console.log('✓ UGC safety, objective spacing, and duplicate code validation passed');
+
+    // -------------------------------------------------------------
+    // TEST 22: Concurrency & Transaction Atomicity on Objective Capture
+    // -------------------------------------------------------------
+    const raceGameRes = await fetch(`${baseUrl}/api/games`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hostAuth.token}`,
+      },
+      body: JSON.stringify({
+        title: 'RACE CONDITION OPERATION',
+        centerLat: 37.7749,
+        centerLng: -122.4194,
+        boundaryRadiusMeters: 500,
+        durationMinutes: 10,
+      }),
+    });
+    const raceGameJson = await raceGameRes.json();
+    const raceGameId = raceGameJson.game.id;
+    const raceTargetObj = raceGameJson.objectives[0];
+
+    await fetch(`${baseUrl}/api/games/join`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${runnerAuth.token}`,
+      },
+      body: JSON.stringify({ roomCode: raceGameJson.game.roomCode }),
+    });
+
+    await fetch(`${baseUrl}/api/games/${raceGameId}/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${hostAuth.token}` },
+    });
+
+    const [capture1, capture2] = await Promise.all([
+      fetch(`${baseUrl}/api/games/${raceGameId}/capture`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${hostAuth.token}`,
+        },
+        body: JSON.stringify({
+          objectiveId: raceTargetObj.id,
+          latitude: raceTargetObj.latitude,
+          longitude: raceTargetObj.longitude,
+          accuracy: 5,
+        }),
+      }),
+      fetch(`${baseUrl}/api/games/${raceGameId}/capture`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${runnerAuth.token}`,
+        },
+        body: JSON.stringify({
+          objectiveId: raceTargetObj.id,
+          latitude: raceTargetObj.latitude,
+          longitude: raceTargetObj.longitude,
+          accuracy: 5,
+        }),
+      }),
+    ]);
+
+    const statuses = [capture1.status, capture2.status].sort();
+    assert.deepStrictEqual(
+      statuses,
+      [200, 409],
+      'Concurrent capture race condition must produce exactly one 200 Success and one 409 Conflict'
+    );
+
+    const raceGameState = await (await fetch(`${baseUrl}/api/games/${raceGameId}`)).json();
+    const securedObj = raceGameState.objectives.find((o: any) => o.id === raceTargetObj.id);
+    assert.strictEqual(securedObj.status, 'SECURED');
+    console.log('✓ Objective capture concurrency & race condition atomicity verified');
 
     console.log('\n======================================================');
     console.log('ALL BACKEND & MULTIPLAYER TESTS PASSED SUCCESSFULLY!');

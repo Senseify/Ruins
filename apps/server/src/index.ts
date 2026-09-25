@@ -12,6 +12,7 @@ import { socialRoutes } from './modules/social';
 import { ugcRoutes } from './modules/ugc';
 import { aiRoutes } from './modules/ai';
 import { realtimePlugin } from './realtime';
+import { db } from './db';
 
 const server = Fastify({
   logger: {
@@ -119,11 +120,16 @@ for (const sig of shutdownSignals) {
 
 export async function startServer() {
   try {
+    // Fail fast on startup if production database is unreachable
+    if (config.isProduction || process.env.USE_POSTGRES === 'true') {
+      await db.verifyConnection();
+      server.log.info('[Ruins Server] PostgreSQL connection verified successfully.');
+    }
     await server.listen({ port: config.port, host: config.host });
     console.log(`[Ruins Server] Listening on http://${config.host}:${config.port}`);
     console.log(`[Ruins Server] WebSocket gateway active at ws://${config.host}:${config.port}/ws`);
   } catch (err) {
-    server.log.error(err);
+    server.log.error(err, '[Ruins Server] Fatal startup failure');
     process.exit(1);
   }
 }

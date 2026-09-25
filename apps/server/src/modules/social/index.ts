@@ -40,7 +40,15 @@ export async function socialRoutes(server: FastifyInstance) {
   });
 
   // 3. Create Squad / Party
-  server.post('/api/parties', { preHandler: [requireAuth] }, async (request, _reply) => {
+  server.post('/api/parties', {
+    preHandler: [requireAuth],
+    config: {
+      rateLimit: {
+        max: 15,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (request, _reply) => {
     const user = (request as any).user as UserRecord;
     const party = await db.createParty(user.id);
     return { status: 'ok', party };
@@ -49,7 +57,15 @@ export async function socialRoutes(server: FastifyInstance) {
   // 4. Join Squad by Party Code
   server.post<{
     Body: { partyCode: string };
-  }>('/api/parties/join', { preHandler: [requireAuth] }, async (request, reply) => {
+  }>('/api/parties/join', {
+    preHandler: [requireAuth],
+    config: {
+      rateLimit: {
+        max: 20,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (request, reply) => {
     const user = (request as any).user as UserRecord;
     const { partyCode } = request.body || {};
     if (!partyCode) {
@@ -92,7 +108,15 @@ export async function socialRoutes(server: FastifyInstance) {
   // 8. Send / Add Friend
   server.post<{
     Body: { friendId: string };
-  }>('/api/friends/request', { preHandler: [requireAuth] }, async (request, reply) => {
+  }>('/api/friends/request', {
+    preHandler: [requireAuth],
+    config: {
+      rateLimit: {
+        max: 20,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (request, reply) => {
     const user = (request as any).user as UserRecord;
     const { friendId } = request.body || {};
     if (!friendId || friendId === user.id) {

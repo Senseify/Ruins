@@ -30,7 +30,15 @@ export async function gameRoutes(server: FastifyInstance) {
       centerLat?: number;
       centerLng?: number;
     };
-  }>('/api/games', { preHandler: [requireAuth] }, async (request, reply) => {
+  }>('/api/games', {
+    preHandler: [requireAuth],
+    config: {
+      rateLimit: {
+        max: 15,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (request, reply) => {
     const user = (request as any).user as UserRecord;
     const {
       title = 'OPERATION CONVERGENCE',
@@ -110,7 +118,15 @@ export async function gameRoutes(server: FastifyInstance) {
     Body: {
       roomCode: string;
     };
-  }>('/api/games/join', { preHandler: [requireAuth] }, async (request, reply) => {
+  }>('/api/games/join', {
+    preHandler: [requireAuth],
+    config: {
+      rateLimit: {
+        max: 30,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (request, reply) => {
     const user = (request as any).user as UserRecord;
     const { roomCode } = request.body || {};
 
@@ -303,14 +319,54 @@ export async function gameRoutes(server: FastifyInstance) {
       accuracy?: number;
       timestamp?: number;
     };
-  }>('/api/games/:id/capture', { preHandler: [requireAuth] }, async (request, reply) => {
+  }>('/api/games/:id/capture', {
+    preHandler: [requireAuth],
+    config: {
+      rateLimit: {
+        max: 60,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (request, reply) => {
     const user = (request as any).user as UserRecord;
     const { id: gameId } = request.params;
     const { objectiveId, latitude, longitude, accuracy = 5, timestamp = Date.now() } =
       request.body || {};
 
-    if (!objectiveId || latitude === undefined || longitude === undefined) {
-      return reply.status(400).send({ error: 'VALIDATION_ERROR: Missing coordinate telemetry' });
+    // 1. Strict coordinate numeric range and finiteness checks
+    if (
+      !objectiveId ||
+      typeof latitude !== 'number' ||
+      !Number.isFinite(latitude) ||
+      latitude < -90 ||
+      latitude > 90 ||
+      typeof longitude !== 'number' ||
+      !Number.isFinite(longitude) ||
+      longitude < -180 ||
+      longitude > 180
+    ) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR: Coordinate telemetry numbers out of valid geographic range' });
+    }
+
+    // 2. Temporal sanity validation: reject stale (>60s) or future (>10s) timestamps
+    const currentServerTime = Date.now();
+    const parsedTimestamp = typeof timestamp === 'number' && Number.isFinite(timestamp) ? timestamp : currentServerTime;
+    if (parsedTimestamp < currentServerTime - 60000 || parsedTimestamp > currentServerTime + 10000) {
+      await db.logAntiCheatIncident({
+        gameId,
+        userId: user.id,
+        incidentType: 'TEMPORAL_ANOMALY',
+        calculatedValue: parsedTimestamp - currentServerTime,
+        thresholdValue: 10000,
+        payload: { objectiveId, timestamp: parsedTimestamp, serverTime: currentServerTime },
+      });
+      return reply.status(400).send({ error: 'TELEMETRY_ANOMALY: Stale or future timestamp rejected' });
+    }
+
+    // 3. Accuracy sanity check
+    const validAccuracy = typeof accuracy === 'number' && Number.isFinite(accuracy) ? Math.max(accuracy, 0) : 5;
+    if (validAccuracy > 150) {
+      return reply.status(400).send({ error: 'UNRELIABLE_TELEMETRY: GPS accuracy threshold exceeded (poor fix)' });
     }
 
     const game = await db.findGameById(gameId);
@@ -413,8 +469,11 @@ export async function gameRoutes(server: FastifyInstance) {
     // Authoritative capture confirmed!
     const pointsAwarded = modeValidation.pointsAwarded || objective.points;
     const updatedObjective = await db.captureObjective(objectiveId, user.id, player.teamIndex);
+    if (!updatedObjective) {
+      return reply.status(409).send({ error: 'CONFLICT: Objective was secured by another operative concurrently' });
+    }
     await db.updatePlayerScore(gameId, user.id, pointsAwarded);
-    await db.updatePlayerTelemetry(gameId, user.id, latitude, longitude, 0);
+    await db.updatePlayerTelemetry(gameId, user.id, latitude, longitude, 0, new Date(parsedTimestamp));
 
     // Record audit event
     await db.recordEvent(

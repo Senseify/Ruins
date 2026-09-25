@@ -3,6 +3,7 @@
  * Connects to the RUINS backend WebSocket gateway for real-time multiplayer telemetry.
  */
 
+import { AppState, AppStateStatus } from 'react-native';
 import { apiClient } from './apiClient';
 
 export type RealtimeEventHandler = (payload: any) => void;
@@ -14,6 +15,22 @@ class RealtimeClient {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
   private listeners: Map<string, Set<RealtimeEventHandler>> = new Map();
+  private appStateSubscription: any = null;
+
+  constructor() {
+    // Monitor mobile app foreground / background transitions
+    this.appStateSubscription = AppState.addEventListener(
+      'change',
+      (nextState: AppStateStatus) => {
+        if (nextState === 'active') {
+          // Re-establish WebSocket connection if match was active
+          if (this.currentGameId && (!this.socket || this.socket.readyState !== WebSocket.OPEN)) {
+            this.connect(this.currentGameId);
+          }
+        }
+      }
+    );
+  }
 
   connect(gameId?: string) {
     if (gameId) this.currentGameId = gameId;

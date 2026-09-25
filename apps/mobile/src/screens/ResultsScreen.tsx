@@ -1,12 +1,15 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   StyleSheet,
   Text,
   View,
   ScrollView,
+  ActivityIndicator,
 } from 'react-native';
 import { PALETTE, FONTS } from '../theme/colors';
 import { useNavigation } from '../navigation/NavigationContext';
+import { useAuth } from '../context/AuthContext';
+import { apiClient } from '../services/apiClient';
 import { Header } from '../components/Header';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
@@ -14,8 +17,54 @@ import { Badge } from '../components/Badge';
 
 export const ResultsScreen: React.FC = () => {
   const { navigate, params } = useNavigation();
-  const outcome = params?.outcome || 'VICTORY';
+  const { user } = useAuth();
+
+  const [loading, setLoading] = useState(true);
+  const [matchDetails, setMatchDetails] = useState<any>(params?.results || null);
+
+  const matchId = params?.matchId;
+
+  useEffect(() => {
+    let isMounted = true;
+    async function fetchResults() {
+      if (matchId) {
+        try {
+          const res = await apiClient.games.getResults(matchId);
+          if (res.data?.results && isMounted) {
+            setMatchDetails(res.data.results);
+          }
+        } catch {
+          // fallback to params
+        }
+      }
+      if (isMounted) setLoading(false);
+    }
+    fetchResults();
+    return () => {
+      isMounted = false;
+    };
+  }, [matchId]);
+
+  const outcome = matchDetails?.outcome || params?.outcome || 'VICTORY';
   const isVictory = outcome === 'VICTORY';
+
+  const scoreAlpha = matchDetails?.scoreTeamAlpha ?? params?.scoreAlpha ?? 0;
+  const scoreOmega = matchDetails?.scoreTeamOmega ?? params?.scoreOmega ?? 0;
+  const durationSeconds = matchDetails?.durationSeconds ?? 0;
+
+  const playerStats = matchDetails?.playerStats || [];
+  const myStat = playerStats.find((p: any) => p.userId === user?.id) || playerStats[0];
+
+  const myPlacement = myStat?.placement ?? 1;
+  const totalAgents = Math.max(playerStats.length, 1);
+  const myScore = myStat?.score ?? params?.personalScore ?? 0;
+  const myObjectives = myStat?.objectivesCaptured ?? params?.personalCaptures ?? 0;
+  const myDistanceMeters = myStat?.distanceMeters ?? 0;
+  const myXp = myStat?.xpEarned ?? 100;
+
+  const durationFormatted = `${Math.floor(durationSeconds / 60)}:${String(
+    durationSeconds % 60
+  ).padStart(2, '0')}`;
 
   return (
     <View style={styles.container}>
@@ -26,74 +75,93 @@ export const ResultsScreen: React.FC = () => {
       />
 
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Outcome Banner */}
-        <Card style={styles.outcomeCard} accentTop>
-          <Text style={styles.outcomeLabel}>OPERATIONAL STATUS</Text>
-          <Text
-            style={[
-              styles.outcomeTitle,
-              isVictory ? styles.textVictory : styles.textDefeat,
-            ]}
-          >
-            {isVictory ? 'THEATER SECURED' : 'SECTOR CONCEDED'}
-          </Text>
-          <Text style={styles.outcomeDesc}>
-            {isVictory
-              ? 'Team Alpha maintained territorial convergence above the minimum quorum.'
-              : 'Opposing operatives established dominant extraction threshold.'}
-          </Text>
-        </Card>
-
-        {/* Team Score Tally */}
-        <Card style={styles.scoreCard}>
-          <Text style={styles.cardHeader}>FINAL SECTOR TALLY</Text>
-          <View style={styles.tallyRow}>
-            <View style={styles.tallyUnit}>
-              <Text style={styles.tallyTeam}>TEAM ALPHA [YOU]</Text>
-              <Text style={styles.tallyScoreAlpha}>440</Text>
-              <Text style={styles.tallyStatus}>WINNER</Text>
-            </View>
-
-            <View style={styles.tallyDivider} />
-
-            <View style={styles.tallyUnit}>
-              <Text style={styles.tallyTeam}>TEAM OMEGA</Text>
-              <Text style={styles.tallyScoreOmega}>210</Text>
-              <Text style={styles.tallyStatus}>CONCEDED</Text>
-            </View>
-          </View>
-        </Card>
-
-        {/* Personal Agent Metrics */}
-        <View style={styles.sectionBlock}>
-          <Text style={styles.sectionTitle}>INDIVIDUAL AGENT DOSSIER</Text>
-          <Card style={styles.metricsCard}>
-            <View style={styles.metricRow}>
-              <Text style={styles.metricLabel}>THEATER PLACEMENT</Text>
-              <Text style={styles.metricValue}>#1 / 4 AGENTS</Text>
-            </View>
-            <View style={styles.metricRow}>
-              <Text style={styles.metricLabel}>PERSONAL CONTRIBUTION</Text>
-              <Text style={styles.metricValue}>240 PTS</Text>
-            </View>
-            <View style={styles.metricRow}>
-              <Text style={styles.metricLabel}>OBJECTIVES SECURED</Text>
-              <Text style={styles.metricValue}>2 NODES</Text>
-            </View>
-            <View style={styles.metricRow}>
-              <Text style={styles.metricLabel}>GROUND TRAVERSED</Text>
-              <Text style={styles.metricValue}>1.42 KM</Text>
-            </View>
-            <View style={styles.metricRow}>
-              <Text style={styles.metricLabel}>ELAPSED ACTIVE TIME</Text>
-              <Text style={styles.metricValue}>14:22</Text>
-            </View>
-            <View style={[styles.metricRow, styles.xpRow]}>
-              <Text style={styles.xpLabel}>PROGRESSION EARNED</Text>
-              <Text style={styles.xpValue}>+180 XP</Text>
-            </View>
+        {loading ? (
+          <Card style={styles.outcomeCard}>
+            <ActivityIndicator size="small" color={PALETTE.titanium} />
+            <Text style={[styles.outcomeLabel, { marginTop: 8, textAlign: 'center' }]}>
+              RECONCILING SECTOR RESULTS...
+            </Text>
           </Card>
-        </View>
+        ) : (
+          <>
+            {/* Outcome Banner */}
+            <Card style={styles.outcomeCard} accentTop>
+              <Text style={styles.outcomeLabel}>OPERATIONAL STATUS</Text>
+              <Text
+                style={[
+                  styles.outcomeTitle,
+                  isVictory ? styles.textVictory : styles.textDefeat,
+                ]}
+              >
+                {isVictory ? 'THEATER SECURED' : 'SECTOR CONCEDED'}
+              </Text>
+              <Text style={styles.outcomeDesc}>
+                {isVictory
+                  ? 'Team Alpha maintained territorial convergence above the minimum quorum.'
+                  : 'Opposing operatives established dominant extraction threshold.'}
+              </Text>
+            </Card>
+
+            {/* Team Score Tally */}
+            <Card style={styles.scoreCard}>
+              <Text style={styles.cardHeader}>FINAL SECTOR TALLY</Text>
+              <View style={styles.tallyRow}>
+                <View style={styles.tallyUnit}>
+                  <Text style={styles.tallyTeam}>TEAM ALPHA</Text>
+                  <Text style={styles.tallyScoreAlpha}>{scoreAlpha}</Text>
+                  <Text style={styles.tallyStatus}>
+                    {scoreAlpha >= scoreOmega ? 'WINNER' : 'DEFEATED'}
+                  </Text>
+                </View>
+
+                <View style={styles.tallyDivider} />
+
+                <View style={styles.tallyUnit}>
+                  <Text style={styles.tallyTeam}>TEAM OMEGA</Text>
+                  <Text style={styles.tallyScoreOmega}>{scoreOmega}</Text>
+                  <Text style={styles.tallyStatus}>
+                    {scoreOmega > scoreAlpha ? 'WINNER' : 'DEFEATED'}
+                  </Text>
+                </View>
+              </View>
+            </Card>
+
+            {/* Personal Agent Metrics */}
+            <View style={styles.sectionBlock}>
+              <Text style={styles.sectionTitle}>INDIVIDUAL AGENT DOSSIER</Text>
+              <Card style={styles.metricsCard}>
+                <View style={styles.metricRow}>
+                  <Text style={styles.metricLabel}>THEATER PLACEMENT</Text>
+                  <Text style={styles.metricValue}>
+                    #{myPlacement} / {totalAgents} AGENT{totalAgents > 1 ? 'S' : ''}
+                  </Text>
+                </View>
+                <View style={styles.metricRow}>
+                  <Text style={styles.metricLabel}>PERSONAL CONTRIBUTION</Text>
+                  <Text style={styles.metricValue}>{myScore} PTS</Text>
+                </View>
+                <View style={styles.metricRow}>
+                  <Text style={styles.metricLabel}>OBJECTIVES SECURED</Text>
+                  <Text style={styles.metricValue}>{myObjectives} NODES</Text>
+                </View>
+                <View style={styles.metricRow}>
+                  <Text style={styles.metricLabel}>GROUND TRAVERSED</Text>
+                  <Text style={styles.metricValue}>
+                    {(myDistanceMeters / 1000).toFixed(2)} KM
+                  </Text>
+                </View>
+                <View style={styles.metricRow}>
+                  <Text style={styles.metricLabel}>ELAPSED ACTIVE TIME</Text>
+                  <Text style={styles.metricValue}>{durationFormatted}</Text>
+                </View>
+                <View style={[styles.metricRow, styles.xpRow]}>
+                  <Text style={styles.xpLabel}>PROGRESSION EARNED</Text>
+                  <Text style={styles.xpValue}>+{myXp} XP</Text>
+                </View>
+              </Card>
+            </View>
+          </>
+        )}
 
         {/* Actions */}
         <Button
@@ -101,7 +169,7 @@ export const ResultsScreen: React.FC = () => {
           variant="primary"
           size="lg"
           onPress={() => navigate('HOME')}
-          style={{ marginBottom: 10 }}
+          style={{ marginBottom: 10, marginTop: 12 }}
         />
         <Button
           label="BROWSE NEW OPERATIONS"

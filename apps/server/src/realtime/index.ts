@@ -21,14 +21,30 @@ class RealtimeManager {
 
     socket.on('message', async (data: Buffer | string) => {
       try {
-        const message = JSON.parse(data.toString());
-        const { type, payload } = message;
+        let message: any;
+        try {
+          message = JSON.parse(data.toString());
+        } catch {
+          socket.send(JSON.stringify({ type: 'ERROR', message: 'MALFORMED_MESSAGE: Invalid JSON syntax' }));
+          return;
+        }
+
+        const { type, payload } = message || {};
+        if (!type || typeof type !== 'string') {
+          socket.send(JSON.stringify({ type: 'ERROR', message: 'MALFORMED_MESSAGE: Missing event type' }));
+          return;
+        }
 
         switch (type) {
           // 1. Authenticate Socket
           case 'AUTH': {
             const token = payload?.token;
-            const verified = token ? verifyToken(token) : null;
+            if (!token || typeof token !== 'string') {
+              socket.send(JSON.stringify({ type: 'ERROR', message: 'INVALID_AUTH_TOKEN' }));
+              return;
+            }
+
+            const verified = verifyToken(token);
             if (!verified) {
               socket.send(JSON.stringify({ type: 'ERROR', message: 'INVALID_AUTH_TOKEN' }));
               return;
@@ -57,7 +73,7 @@ class RealtimeManager {
             break;
           }
 
-          // 2. Join Match Realtime Room
+          // 2. Join Match Realtime Room (With Strict Membership Authorization)
           case 'JOIN_MATCH': {
             if (!clientRecord) {
               socket.send(JSON.stringify({ type: 'ERROR', message: 'UNAUTHENTICATED' }));
@@ -65,10 +81,38 @@ class RealtimeManager {
             }
 
             const gameId = payload?.gameId;
+            if (!gameId || typeof gameId !== 'string') {
+              socket.send(JSON.stringify({ type: 'ERROR', message: 'INVALID_PAYLOAD: gameId required' }));
+              return;
+            }
+
             const game = await db.findGameById(gameId);
             if (!game) {
               socket.send(JSON.stringify({ type: 'ERROR', message: 'GAME_NOT_FOUND' }));
               return;
+            }
+
+            // CRITICAL AUTHORIZATION CHECK: Verify user is an active participant in this match
+            const isEnrolled = await db.getGamePlayer(gameId, clientRecord.userId);
+            if (!isEnrolled) {
+              socket.send(
+                JSON.stringify({
+                  type: 'ERROR',
+                  message: 'FORBIDDEN: Agent not enrolled in this game theater',
+                })
+              );
+              return;
+            }
+
+            // Clean up previous room subscription if switching matches
+            if (clientRecord.gameId && clientRecord.gameId !== gameId) {
+              const prevRoom = this.gameRooms.get(clientRecord.gameId);
+              if (prevRoom) {
+                prevRoom.delete(socketKey);
+                if (prevRoom.size === 0) {
+                  this.gameRooms.delete(clientRecord.gameId);
+                }
+              }
             }
 
             clientRecord.gameId = gameId;
@@ -96,11 +140,32 @@ class RealtimeManager {
             break;
           }
 
-          // 3. Location Telemetry from Client (Throttled & Validated)
+          // 3. Location Telemetry from Client (Throttled & Rigorously Validated)
           case 'LOCATION_UPDATE': {
             if (!clientRecord || !clientRecord.gameId) return;
 
             const { latitude, longitude, speed = 0, heading = 0 } = payload || {};
+
+            // Strict numeric verification (reject NaN, Infinity, strings, and out-of-bound coords)
+            if (
+              typeof latitude !== 'number' ||
+              !Number.isFinite(latitude) ||
+              latitude < -90 ||
+              latitude > 90 ||
+              typeof longitude !== 'number' ||
+              !Number.isFinite(longitude) ||
+              longitude < -180 ||
+              longitude > 180
+            ) {
+              socket.send(
+                JSON.stringify({
+                  type: 'ERROR',
+                  message: 'INVALID_TELEMETRY: Coordinate numbers out of valid geographic range',
+                })
+              );
+              return;
+            }
+
             const now = Date.now();
 
             // Throttle to 1 Hz max to conserve mobile client battery and server network bandwidth
@@ -120,8 +185,8 @@ class RealtimeManager {
                 userId: clientRecord.userId,
                 latitude,
                 longitude,
-                speed,
-                heading,
+                speed: Number.isFinite(speed) ? speed : 0,
+                heading: Number.isFinite(heading) ? heading : 0,
               },
               socketKey // don't echo back to sender
             );
@@ -131,6 +196,11 @@ class RealtimeManager {
           // 4. Heartbeat Ping / Pong
           case 'PING': {
             socket.send(JSON.stringify({ type: 'PONG', timestamp: Date.now() }));
+            break;
+          }
+
+          default: {
+            socket.send(JSON.stringify({ type: 'ERROR', message: `UNKNOWN_EVENT_TYPE: ${type}` }));
             break;
           }
         }

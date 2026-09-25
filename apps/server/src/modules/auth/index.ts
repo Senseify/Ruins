@@ -60,7 +60,14 @@ export async function authRoutes(server: FastifyInstance) {
       password: string;
       displayName?: string;
     };
-  }>('/api/auth/register', async (request, reply) => {
+  }>('/api/auth/register', {
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (request, reply) => {
     const { username, email, password, displayName } = request.body || {};
 
     if (!username || username.trim().length < 3) {
@@ -121,7 +128,14 @@ export async function authRoutes(server: FastifyInstance) {
       emailOrUsername: string;
       password: string;
     };
-  }>('/api/auth/login', async (request, reply) => {
+  }>('/api/auth/login', {
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (request, reply) => {
     const { emailOrUsername, password } = request.body || {};
 
     if (!emailOrUsername || !password) {

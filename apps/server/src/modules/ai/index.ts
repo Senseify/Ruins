@@ -125,7 +125,15 @@ export async function aiRoutes(server: FastifyInstance) {
   // 2. Generate Mission Briefing (Sandboxed & Authoritative)
   server.post<{
     Body: AIMissionInput;
-  }>('/api/ai/generate-briefing', { preHandler: [requireAuth] }, async (request, reply) => {
+  }>('/api/ai/generate-briefing', {
+    preHandler: [requireAuth],
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (request, reply) => {
     const body = request.body || {};
     const mode = (body.mode || 'CONVERGENCE') as GameMode;
     const difficulty = body.difficulty || 'MEDIUM';
@@ -166,6 +174,7 @@ Return ONLY a JSON object with this exact schema:
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(6000),
             body: JSON.stringify({
               contents: [{ parts: [{ text: promptText }] }],
               generationConfig: {

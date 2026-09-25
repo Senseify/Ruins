@@ -17,11 +17,7 @@
       "bundleIdentifier": "com.senseify.ruins",
       "buildNumber": "1",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "RUINS requires real-time physical location telemetry to track your operative position relative to mission objectives on the tactical map.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "RUINS requires location access while an operation is active to verify proximity captures and update live squad positions.",
-        "UIBackgroundModes": [
-          "location"
-        ]
+        "NSLocationWhenInUseUsageDescription": "RUINS requires real-time physical location telemetry to track your operative position relative to mission objectives on the tactical map."
       }
     },
     "android": {
@@ -35,10 +31,7 @@
       },
       "permissions": [
         "ACCESS_COARSE_LOCATION",
-        "ACCESS_FINE_LOCATION",
-        "ACCESS_BACKGROUND_LOCATION",
-        "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_LOCATION"
+        "ACCESS_FINE_LOCATION"
       ],
       "predictiveBackGestureEnabled": false
     },
@@ -46,9 +39,10 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "RUINS requires background location during active tactical operations to verify proximity captures."
+          "locationWhenInUsePermission": "RUINS requires location access to verify physical objective proximity on the live tactical map."
         }
-      ]
+      ],
+      "expo-secure-store"
     ],
     "web": {
       "favicon": "./assets/favicon.png"

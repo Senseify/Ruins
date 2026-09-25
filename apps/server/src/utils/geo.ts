@@ -26,8 +26,9 @@ export function calculateHaversineDistance(p1: LatLng, p2: LatLng): number {
 
 /**
  * Validates whether the movement between two consecutive telemetry pings is physically plausible.
- * Top human sprint speed is ~11 m/s (40 km/h).
- * We set the threshold at 14 m/s (50 km/h) to allow for GPS jitter without false positives.
+ * Serves as suspicious telemetry / impossible movement detection rather than foolproof GPS spoofing protection.
+ * Top human sprint speed is ~11 m/s (~40 km/h).
+ * We set the threshold at 14 m/s (~50 km/h) with a 2-meter noise deadband to permit real-world GPS jitter without false positives.
  */
 export function validateKinematicSpeed(
   prevCoord: LatLng,
@@ -35,13 +36,38 @@ export function validateKinematicSpeed(
   newCoord: LatLng,
   newTimestamp: number
 ): { isPlausible: boolean; calculatedSpeedMps: number } {
-  const deltaSeconds = Math.max((newTimestamp - prevTimestamp) / 1000, 0.5);
+  // Reject NaN, Infinity, or missing coordinates/timestamps
+  if (
+    !prevCoord ||
+    !newCoord ||
+    !Number.isFinite(prevCoord.latitude) ||
+    !Number.isFinite(prevCoord.longitude) ||
+    !Number.isFinite(newCoord.latitude) ||
+    !Number.isFinite(newCoord.longitude) ||
+    !Number.isFinite(prevTimestamp) ||
+    !Number.isFinite(newTimestamp)
+  ) {
+    return { isPlausible: false, calculatedSpeedMps: 0 };
+  }
+
   const distance = calculateHaversineDistance(prevCoord, newCoord);
+  // Stationary deadband: GPS drift under 2.5 meters while standing still is normal noise
+  if (distance <= 2.5) {
+    return { isPlausible: true, calculatedSpeedMps: 0 };
+  }
+
+  const rawDelta = (newTimestamp - prevTimestamp) / 1000;
+  // Clock reversal / backward timestamps are anomalous
+  if (rawDelta < 0) {
+    return { isPlausible: false, calculatedSpeedMps: Infinity };
+  }
+
+  const deltaSeconds = Math.max(rawDelta, 0.5);
   const speed = distance / deltaSeconds;
 
   return {
-    isPlausible: speed <= 14.0,
-    calculatedSpeedMps: Math.round(speed * 10) / 10,
+    isPlausible: Number.isFinite(speed) && speed <= 14.0,
+    calculatedSpeedMps: Number.isFinite(speed) ? Math.round(speed * 10) / 10 : 0,
   };
 }
 

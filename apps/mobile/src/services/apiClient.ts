@@ -3,10 +3,49 @@
  * Centralized REST API client for RUINS backend services.
  */
 
+import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
-const TOKEN_KEY = '@ruins_auth_token';
+const TOKEN_KEY = 'ruins_auth_token';
+
+/**
+ * Storage Abstraction:
+ * Uses hardware-backed encrypted storage (iOS Keychain / Android KeyStore via expo-secure-store)
+ * on native devices. Falls back to AsyncStorage on Web where native Keychains are unavailable.
+ */
+async function getSecureItem(key: string): Promise<string | null> {
+  if (Platform.OS === 'web') {
+    return AsyncStorage.getItem(key);
+  }
+  try {
+    return await SecureStore.getItemAsync(key);
+  } catch {
+    return AsyncStorage.getItem(key);
+  }
+}
+
+async function setSecureItem(key: string, value: string): Promise<void> {
+  if (Platform.OS === 'web') {
+    return AsyncStorage.setItem(key, value);
+  }
+  try {
+    await SecureStore.setItemAsync(key, value);
+  } catch {
+    await AsyncStorage.setItem(key, value);
+  }
+}
+
+async function deleteSecureItem(key: string): Promise<void> {
+  if (Platform.OS === 'web') {
+    return AsyncStorage.removeItem(key);
+  }
+  try {
+    await SecureStore.deleteItemAsync(key);
+  } catch {
+    await AsyncStorage.removeItem(key);
+  }
+}
 
 // Default localhost URL based on runtime environment
 // Android emulator uses 10.0.2.2 to access host machine; iOS uses localhost
@@ -20,7 +59,7 @@ class ApiClient {
 
   async init() {
     try {
-      this.token = await AsyncStorage.getItem(TOKEN_KEY);
+      this.token = await getSecureItem(TOKEN_KEY);
     } catch {
       this.token = null;
     }
@@ -37,9 +76,9 @@ class ApiClient {
   async setToken(token: string | null) {
     this.token = token;
     if (token) {
-      await AsyncStorage.setItem(TOKEN_KEY, token);
+      await setSecureItem(TOKEN_KEY, token);
     } else {
-      await AsyncStorage.removeItem(TOKEN_KEY);
+      await deleteSecureItem(TOKEN_KEY);
     }
   }
 
@@ -153,6 +192,7 @@ class ApiClient {
       }),
 
     leave: (id: string) => this.request<any>(`/api/games/${id}/leave`, { method: 'POST' }),
+    getResults: (id: string) => this.request<any>(`/api/games/${id}/results`),
   };
 }
 
