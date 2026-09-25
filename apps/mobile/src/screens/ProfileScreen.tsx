@@ -7,49 +7,15 @@ import {
 } from 'react-native';
 import { PALETTE, FONTS } from '../theme/colors';
 import { useNavigation } from '../navigation/NavigationContext';
+import { useAuth } from '../context/AuthContext';
 import { Header } from '../components/Header';
 import { Card } from '../components/Card';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 
-interface MatchHistoryEntry {
-  id: string;
-  title: string;
-  date: string;
-  outcome: 'VICTORY' | 'DEFEAT';
-  points: number;
-  objectives: number;
-}
-
-const MOCK_HISTORY: MatchHistoryEntry[] = [
-  {
-    id: 'h1',
-    title: 'OPERATION CONVERGENCE',
-    date: 'TODAY // 14:22',
-    outcome: 'VICTORY',
-    points: 240,
-    objectives: 2,
-  },
-  {
-    id: 'h2',
-    title: 'DISTRICT 07 PURGE',
-    date: 'YESTERDAY',
-    outcome: 'VICTORY',
-    points: 310,
-    objectives: 3,
-  },
-  {
-    id: 'h3',
-    title: 'HARBOR EXTRACTION',
-    date: '23 SEP 2026',
-    outcome: 'DEFEAT',
-    points: 90,
-    objectives: 1,
-  },
-];
-
 export const ProfileScreen: React.FC = () => {
   const { navigate } = useNavigation();
+  const { user, loginAsQuickOperative } = useAuth();
 
   return (
     <View style={styles.container}>
@@ -67,78 +33,92 @@ export const ProfileScreen: React.FC = () => {
       />
 
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Agent Identity Card */}
-        <Card style={styles.identityCard} accentTop>
-          <View style={styles.identityRow}>
-            <View style={styles.avatarBox}>
-              <Text style={styles.avatarInitials}>09</Text>
-            </View>
-            <View style={styles.identityMeta}>
-              <View style={styles.callsignRow}>
-                <Text style={styles.callsignText}>AGENT 09</Text>
-                <Badge label="ACTIVE" variant="titanium" style={{ marginLeft: 8 }} />
+        {/* If guest, show auth prompt */}
+        {!user ? (
+          <Card style={styles.guestCard} accentTop>
+            <Text style={styles.guestTitle}>OPERATIVE UNREGISTERED</Text>
+            <Text style={styles.guestDesc}>
+              Authenticate to track personal XP, operational rankings, and mission logs.
+            </Text>
+            <Button
+              label="INITIALIZE AGENT CALLSIGN"
+              variant="primary"
+              onPress={loginAsQuickOperative}
+              style={{ marginTop: 12 }}
+            />
+          </Card>
+        ) : (
+          /* Agent Identity Card */
+          <Card style={styles.identityCard} accentTop>
+            <View style={styles.identityRow}>
+              <View style={styles.avatarBox}>
+                <Text style={styles.avatarInitials}>
+                  {user.username.substring(0, 2).toUpperCase()}
+                </Text>
               </View>
-              <Text style={styles.agentId}>ID: RN-7749-ALPHA // SECTOR 03</Text>
-              <Text style={styles.agentRank}>LEVEL 04 // FIELD OPERATIVE</Text>
+              <View style={styles.identityMeta}>
+                <View style={styles.callsignRow}>
+                  <Text style={styles.callsignText}>{user.username.toUpperCase()}</Text>
+                  <Badge label="AUTHENTICATED" variant="titanium" style={{ marginLeft: 8 }} />
+                </View>
+                <Text style={styles.agentId}>ID: RN-{user.id.substring(0, 8).toUpperCase()}</Text>
+                <Text style={styles.agentRank}>LEVEL {user.level} // FIELD OPERATIVE</Text>
+              </View>
             </View>
-          </View>
 
-          {/* XP Progress Bar */}
-          <View style={styles.xpBlock}>
-            <View style={styles.xpTextRow}>
-              <Text style={styles.xpLabel}>PROGRESSION TO LEVEL 05</Text>
-              <Text style={styles.xpCount}>1,420 / 2,000 XP</Text>
+            {/* XP Progress Bar */}
+            <View style={styles.xpBlock}>
+              <View style={styles.xpTextRow}>
+                <Text style={styles.xpLabel}>PROGRESSION TO NEXT LEVEL</Text>
+                <Text style={styles.xpCount}>{user.xp % 500} / 500 XP</Text>
+              </View>
+              <View style={styles.xpTrack}>
+                <View
+                  style={[
+                    styles.xpFill,
+                    { width: `${Math.min(((user.xp % 500) / 500) * 100, 100)}%` },
+                  ]}
+                />
+              </View>
             </View>
-            <View style={styles.xpTrack}>
-              <View style={[styles.xpFill, { width: '71%' }]} />
-            </View>
-          </View>
-        </Card>
+          </Card>
+        )}
 
         {/* Career Statistics */}
         <View style={styles.sectionBlock}>
           <Text style={styles.sectionTitle}>CUMULATIVE PERFORMANCE</Text>
           <View style={styles.statsGrid}>
             <Card style={styles.statBox}>
-              <Text style={styles.statNumber}>12</Text>
+              <Text style={styles.statNumber}>{user?.gamesPlayed ?? 0}</Text>
               <Text style={styles.statLabel}>MISSIONS</Text>
             </Card>
             <Card style={styles.statBox}>
-              <Text style={styles.statNumber}>8</Text>
+              <Text style={styles.statNumber}>{user?.wins ?? 0}</Text>
               <Text style={styles.statLabel}>VICTORIES</Text>
             </Card>
             <Card style={styles.statBox}>
-              <Text style={styles.statNumber}>66%</Text>
+              <Text style={styles.statNumber}>
+                {user && user.gamesPlayed > 0
+                  ? `${Math.round((user.wins / user.gamesPlayed) * 100)}%`
+                  : '0%'}
+              </Text>
               <Text style={styles.statLabel}>WIN RATE</Text>
             </Card>
             <Card style={styles.statBox}>
-              <Text style={styles.statNumber}>18.6k</Text>
-              <Text style={styles.statLabel}>GROUND M</Text>
+              <Text style={styles.statNumber}>{user?.totalScore ?? 0}</Text>
+              <Text style={styles.statLabel}>TOTAL PTS</Text>
             </Card>
           </View>
         </View>
 
-        {/* Mission History */}
+        {/* Tactical Security Audit */}
         <View style={styles.sectionBlock}>
-          <Text style={styles.sectionTitle}>RECENT THEATER LOGS</Text>
-          {MOCK_HISTORY.map((match) => (
-            <Card key={match.id} style={styles.historyCard}>
-              <View style={styles.historyHeader}>
-                <View>
-                  <Text style={styles.historyTitle}>{match.title}</Text>
-                  <Text style={styles.historyDate}>{match.date}</Text>
-                </View>
-                <Badge
-                  label={match.outcome}
-                  variant={match.outcome === 'VICTORY' ? 'green' : 'muted'}
-                />
-              </View>
-              <View style={styles.historyFooter}>
-                <Text style={styles.historyMeta}>+{match.points} PTS</Text>
-                <Text style={styles.historyMeta}>{match.objectives} CAPTURES</Text>
-              </View>
-            </Card>
-          ))}
+          <Text style={styles.sectionTitle}>SECURITY CREDENTIAL AUDIT</Text>
+          <Card style={styles.securityCard}>
+            <Text style={styles.secLabel}>ENCRYPTION: AES-256 JWT BEARER</Text>
+            <Text style={styles.secLabel}>LOCATION PRIVACY: 1HZ KINEMATIC TOLERANCE</Text>
+            <Text style={styles.secLabel}>AUTHORITATIVE NODE: DISPATCH CONTROLLED</Text>
+          </Card>
         </View>
       </ScrollView>
     </View>
@@ -153,6 +133,26 @@ const styles = StyleSheet.create({
   content: {
     padding: 16,
     paddingBottom: 28,
+  },
+  guestCard: {
+    padding: 16,
+    marginBottom: 18,
+    alignItems: 'center',
+  },
+  guestTitle: {
+    fontFamily: FONTS.mono,
+    fontSize: 12,
+    fontWeight: '700',
+    color: PALETTE.titanium,
+    letterSpacing: 2,
+    marginBottom: 6,
+  },
+  guestDesc: {
+    fontFamily: FONTS.mono,
+    fontSize: 8.5,
+    color: PALETTE.textSecondary,
+    textAlign: 'center',
+    lineHeight: 13,
   },
   identityCard: {
     padding: 16,
@@ -240,7 +240,6 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: PALETTE.titanium,
   },
-
   sectionBlock: {
     marginBottom: 18,
   },
@@ -275,42 +274,14 @@ const styles = StyleSheet.create({
     color: PALETTE.textTertiary,
     letterSpacing: 1,
   },
-
-  historyCard: {
+  securityCard: {
     padding: 12,
-    marginBottom: 8,
+    gap: 6,
   },
-  historyHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 8,
-  },
-  historyTitle: {
-    fontFamily: FONTS.sansMedium,
-    fontSize: 13,
-    fontWeight: '600',
-    color: PALETTE.textFog,
-    letterSpacing: 1,
-  },
-  historyDate: {
+  secLabel: {
     fontFamily: FONTS.mono,
-    fontSize: 7.5,
+    fontSize: 8,
     color: PALETTE.textTertiary,
-    letterSpacing: 1,
-    marginTop: 2,
-  },
-  historyFooter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    borderTopWidth: 0.5,
-    borderTopColor: PALETTE.borderHairline,
-    paddingTop: 8,
-  },
-  historyMeta: {
-    fontFamily: FONTS.mono,
-    fontSize: 8.5,
-    color: PALETTE.textSecondary,
     letterSpacing: 1,
   },
 });

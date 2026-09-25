@@ -5,9 +5,13 @@ import {
   View,
   ScrollView,
   TouchableOpacity,
+  ActivityIndicator,
 } from 'react-native';
 import { PALETTE, FONTS } from '../theme/colors';
 import { useNavigation } from '../navigation/NavigationContext';
+import { useAuth } from '../context/AuthContext';
+import { locationService } from '../services/locationService';
+import { apiClient } from '../services/apiClient';
 import { Header } from '../components/Header';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
@@ -16,13 +20,13 @@ import { Badge } from '../components/Badge';
 
 export const CreateGameScreen: React.FC = () => {
   const { navigate } = useNavigation();
+  const { user, loginAsQuickOperative } = useAuth();
 
   const [title, setTitle] = useState('OPERATION CONVERGENCE');
   const [radius, setRadius] = useState<number>(400);
   const [duration, setDuration] = useState<number>(15);
-  const [generatedCode] = useState<string>(
-    'RUIN' + Math.floor(10 + Math.random() * 90)
-  );
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const radiusOptions = [
     { label: '200M', sub: 'MICRO', value: 200 },
@@ -36,11 +40,44 @@ export const CreateGameScreen: React.FC = () => {
     { label: '25 MIN', value: 25 },
   ];
 
-  const handleDeploy = () => {
-    navigate('LOBBY', {
-      gameId: 'new-operation',
-      roomCode: generatedCode,
+  const handleDeploy = async () => {
+    setLoading(true);
+    setErrorMsg(null);
+
+    // Ensure operative is authenticated
+    if (!user) {
+      const authRes = await loginAsQuickOperative();
+      if (!authRes.success) {
+        setErrorMsg('Failed to establish operative credentials');
+        setLoading(false);
+        return;
+      }
+    }
+
+    // Get current GPS fix to anchor match boundary
+    const loc = await locationService.getCurrentLocation();
+    const centerLat = loc?.latitude ?? 37.7749;
+    const centerLng = loc?.longitude ?? -122.4194;
+
+    const res = await apiClient.games.create({
+      title,
+      mode: 'CONVERGENCE',
+      boundaryRadiusMeters: radius,
+      durationMinutes: duration,
+      centerLat,
+      centerLng,
     });
+
+    setLoading(false);
+
+    if (res.data?.game) {
+      navigate('LOBBY', {
+        gameId: res.data.game.id,
+        roomCode: res.data.game.roomCode,
+      });
+    } else {
+      setErrorMsg(res.error || 'Failed to establish operation lobby');
+    }
   };
 
   return (
@@ -52,17 +89,12 @@ export const CreateGameScreen: React.FC = () => {
       />
 
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Generated Access Protocol */}
-        <Card style={styles.protocolCard} accentTop>
-          <View style={styles.protocolHeader}>
-            <Text style={styles.protocolLabel}>GENERATED ROOM CODE</Text>
-            <Badge label="HOST AUTHORIZED" variant="titanium" />
-          </View>
-          <Text style={styles.protocolCode}>{generatedCode}</Text>
-          <Text style={styles.protocolHint}>
-            SHARE WITH FIELD AGENTS TO JOIN PRE-DEPLOYMENT LOBBY
-          </Text>
-        </Card>
+        {/* Error Alert */}
+        {errorMsg && (
+          <Card style={styles.errorCard}>
+            <Text style={styles.errorText}>// {errorMsg}</Text>
+          </Card>
+        )}
 
         {/* Operation Title Input */}
         <Input
@@ -84,7 +116,7 @@ export const CreateGameScreen: React.FC = () => {
                   Proximity capture, node extraction & territory dominance
                 </Text>
               </View>
-              <Badge label="CANON" variant="titanium" />
+              <Badge label="AUTHORITATIVE" variant="titanium" />
             </View>
           </Card>
         </View>
@@ -147,9 +179,10 @@ export const CreateGameScreen: React.FC = () => {
 
         {/* Deploy Button */}
         <Button
-          label="ESTABLISH LOBBY"
+          label={loading ? 'SYNCHRONIZING SATELLITE...' : 'ESTABLISH LOBBY'}
           variant="primary"
           size="lg"
+          disabled={loading}
           onPress={handleDeploy}
           style={{ marginTop: 8 }}
         />
@@ -168,34 +201,16 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     paddingBottom: 28,
   },
-  protocolCard: {
-    padding: 16,
-    marginBottom: 20,
+  errorCard: {
+    padding: 10,
+    marginBottom: 14,
+    backgroundColor: PALETTE.dangerMuted,
+    borderColor: PALETTE.accentRed,
   },
-  protocolHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  protocolLabel: {
+  errorText: {
     fontFamily: FONTS.mono,
-    fontSize: 9,
-    color: PALETTE.titanium,
-    letterSpacing: 1.8,
-  },
-  protocolCode: {
-    fontFamily: FONTS.mono,
-    fontSize: 26,
-    fontWeight: '700',
-    color: PALETTE.textFog,
-    letterSpacing: 4,
-    marginVertical: 4,
-  },
-  protocolHint: {
-    fontFamily: FONTS.mono,
-    fontSize: 8,
-    color: PALETTE.textTertiary,
+    fontSize: 8.5,
+    color: PALETTE.accentRed,
     letterSpacing: 1,
   },
   sectionBlock: {

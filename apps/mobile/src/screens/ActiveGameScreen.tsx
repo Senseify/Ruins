@@ -3,67 +3,207 @@ import {
   StyleSheet,
   Text,
   View,
-  Dimensions,
-  Animated,
   TouchableOpacity,
+  ActivityIndicator,
 } from 'react-native';
+import { GeoCoordinate, Objective } from '@ruins/shared';
 import { PALETTE, FONTS } from '../theme/colors';
 import { useNavigation } from '../navigation/NavigationContext';
+import { useAuth } from '../context/AuthContext';
+import { apiClient } from '../services/apiClient';
+import { realtimeClient } from '../services/realtimeClient';
+import { locationService } from '../services/locationService';
+import { calculateHaversineDistance, calculateBearing, bearingToCardinal } from '../services/geoUtils';
+import { RuinsMap } from '../components/RuinsMap';
 import { Card } from '../components/Card';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-
 export const ActiveGameScreen: React.FC = () => {
   const { navigate, params } = useNavigation();
+  const { user } = useAuth();
+  const gameId = params?.gameId;
 
-  const [remainingSeconds, setRemainingSeconds] = useState(14 * 60 + 22); // 14:22
-  const [scoreAlpha, setScoreAlpha] = useState(340);
-  const [scoreOmega, setScoreOmega] = useState(210);
-  const [objectiveCaptured, setObjectiveCaptured] = useState(false);
+  const [game, setGame] = useState<any>(null);
+  const [objectives, setObjectives] = useState<Objective[]>([]);
+  const [playerLocation, setPlayerLocation] = useState<GeoCoordinate | null>(null);
+  const [selectedObjective, setSelectedObjective] = useState<Objective | null>(null);
+  const [scoreAlpha, setScoreAlpha] = useState(0);
+  const [scoreOmega, setScoreOmega] = useState(0);
+  const [remainingSeconds, setRemainingSeconds] = useState(900);
   const [capturing, setCapturing] = useState(false);
   const [captureProgress, setCaptureProgress] = useState(0);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const pulseAnim = useRef(new Animated.Value(0)).current;
-
-  // Match countdown timer simulation
+  // 1. Initial Load of Match State
   useEffect(() => {
-    const timer = setInterval(() => {
-      setRemainingSeconds((prev) => (prev > 0 ? prev - 1 : 0));
-    }, 1000);
-    return () => clearInterval(timer);
+    if (!gameId) return;
+
+    const loadGame = async () => {
+      const res = await apiClient.games.get(gameId);
+      if (res.data?.game) {
+        setGame(res.data.game);
+        setObjectives(res.data.objectives || []);
+        setRemainingSeconds(res.data.game.remainingSeconds ?? 900);
+
+        // Calculate scores from players
+        if (res.data.players) {
+          const a = res.data.players
+            .filter((p: any) => p.teamIndex === 0)
+            .reduce((sum: number, p: any) => sum + (p.score || 0), 0);
+          const o = res.data.players
+            .filter((p: any) => p.teamIndex === 1)
+            .reduce((sum: number, p: any) => sum + (p.score || 0), 0);
+          setScoreAlpha(a);
+          setScoreOmega(o);
+        }
+
+        // Default focus on first active objective
+        const firstActive = res.data.objectives?.find((o: Objective) => o.status === 'ACTIVE');
+        if (firstActive) setSelectedObjective(firstActive);
+      }
+      setLoading(false);
+    };
+
+    loadGame();
+  }, [gameId]);
+
+  // 2. Location Tracking & Telemetry Streaming
+  useEffect(() => {
+    // Start high-precision engagement tracking for active match
+    locationService.startTracking('ENGAGEMENT', (coord) => {
+      setPlayerLocation(coord);
+
+      // Stream to server via WebSockets
+      realtimeClient.sendLocation({
+        latitude: coord.latitude,
+        longitude: coord.longitude,
+        speed: coord.speed,
+        heading: coord.heading,
+      });
+    });
+
+    return () => {
+      locationService.setTrackingMode('IDLE');
+    };
   }, []);
 
-  // Radar animation
+  // 3. Realtime WebSocket Match Room Events
   useEffect(() => {
-    Animated.loop(
-      Animated.timing(pulseAnim, {
-        toValue: 1,
-        duration: 2500,
-        useNativeDriver: true,
-      })
-    ).start();
-  }, [pulseAnim]);
+    if (!gameId) return;
 
-  // Capture simulation loop
+    realtimeClient.joinMatch(gameId);
+
+    const unsubObjective = realtimeClient.on('objective_updated', (payload) => {
+      setObjectives((prev) =>
+        prev.map((obj) =>
+          obj.id === payload.objectiveId
+            ? { ...obj, status: payload.status, capturedByTeam: payload.capturedByTeam }
+            : obj
+        )
+      );
+    });
+
+    const unsubScore = realtimeClient.on('score_updated', (payload) => {
+      if (payload.teamIndex === 0) {
+        setScoreAlpha((s) => s + payload.pointsAdded);
+      } else {
+        setScoreOmega((s) => s + payload.pointsAdded);
+      }
+    });
+
+    const unsubEnd = realtimeClient.on('game_ended', () => {
+      navigate('RESULTS', {
+        matchId: gameId,
+        outcome: scoreAlpha >= scoreOmega ? 'VICTORY' : 'DEFEAT',
+      });
+    });
+
+    return () => {
+      unsubObjective();
+      unsubScore();
+      unsubEnd();
+    };
+  }, [gameId, scoreAlpha, scoreOmega]);
+
+  // 4. Authoritative Match Countdown Timer
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (capturing && captureProgress < 100) {
-      interval = setInterval(() => {
-        setCaptureProgress((prev) => {
-          if (prev >= 100) {
-            setCapturing(false);
-            setObjectiveCaptured(true);
-            setScoreAlpha((s) => s + 100);
-            return 100;
-          }
-          return prev + 10;
-        });
-      }, 300);
+    const timer = setInterval(() => {
+      setRemainingSeconds((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          navigate('RESULTS', {
+            matchId: gameId || 'game-01',
+            outcome: scoreAlpha >= scoreOmega ? 'VICTORY' : 'DEFEAT',
+          });
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [gameId, scoreAlpha, scoreOmega]);
+
+  // 5. Calculate Real-time Distance & Bearing to Target Objective
+  let targetDistance = 999;
+  let targetBearing = 'NORTH';
+  let isWithinRange = false;
+
+  if (playerLocation && selectedObjective) {
+    targetDistance = calculateHaversineDistance(
+      { latitude: playerLocation.latitude, longitude: playerLocation.longitude },
+      {
+        latitude: selectedObjective.coordinate.latitude,
+        longitude: selectedObjective.coordinate.longitude,
+      }
+    );
+    const bearingDeg = calculateBearing(
+      { latitude: playerLocation.latitude, longitude: playerLocation.longitude },
+      {
+        latitude: selectedObjective.coordinate.latitude,
+        longitude: selectedObjective.coordinate.longitude,
+      }
+    );
+    targetBearing = bearingToCardinal(bearingDeg);
+
+    const effectiveRadius =
+      selectedObjective.captureRadiusMeters + Math.min(playerLocation.accuracy ?? 5, 12);
+    isWithinRange = targetDistance <= effectiveRadius;
+  }
+
+  // 6. Handle Objective Capture Interaction
+  const handleCommenceCapture = async () => {
+    if (!gameId || !selectedObjective || !playerLocation) return;
+    setCapturing(true);
+    setErrorMsg(null);
+    setCaptureProgress(20);
+
+    // Simulate sensory progress bar
+    setTimeout(() => setCaptureProgress(60), 300);
+
+    const res = await apiClient.games.capture(gameId, {
+      objectiveId: selectedObjective.id,
+      latitude: playerLocation.latitude,
+      longitude: playerLocation.longitude,
+      accuracy: playerLocation.accuracy,
+    });
+
+    setCaptureProgress(100);
+    setCapturing(false);
+
+    if (res.data?.objective) {
+      // Local optimistic update while websocket event confirms
+      setObjectives((prev) =>
+        prev.map((o) =>
+          o.id === selectedObjective.id ? { ...o, status: 'SECURED' } : o
+        )
+      );
+    } else {
+      setErrorMsg(res.error || 'Server rejected objective capture verification');
     }
-    return () => clearInterval(interval);
-  }, [capturing, captureProgress]);
+  };
 
   const formatTimer = (sec: number) => {
     const m = Math.floor(sec / 60);
@@ -71,26 +211,22 @@ export const ActiveGameScreen: React.FC = () => {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const handleEndMission = () => {
-    navigate('RESULTS', {
-      matchId: params?.gameId || 'game-01',
-      outcome: scoreAlpha >= scoreOmega ? 'VICTORY' : 'DEFEAT',
-    });
-  };
+  if (loading) {
+    return (
+      <View style={[styles.container, styles.center]}>
+        <ActivityIndicator color={PALETTE.titanium} size="large" />
+        <Text style={styles.loadingText}>SYNCHRONIZING SATELLITE THEATER...</Text>
+      </View>
+    );
+  }
 
-  const pulseScale = pulseAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [1, 2.4],
-  });
-
-  const pulseOpacity = pulseAnim.interpolate({
-    inputRange: [0, 0.3, 0.8, 1],
-    outputRange: [0.6, 0.4, 0.1, 0],
-  });
+  const boundaryCenter = game
+    ? { latitude: game.boundaryLat, longitude: game.boundaryLng }
+    : undefined;
 
   return (
     <View style={styles.container}>
-      {/* ================= ACTIVE HUD TOP BAR ================= */}
+      {/* Top HUD Score & Countdown Bar */}
       <View style={styles.hudTopBar}>
         <View style={styles.scoresRow}>
           <View style={styles.scoreUnit}>
@@ -110,100 +246,64 @@ export const ActiveGameScreen: React.FC = () => {
         </View>
       </View>
 
-      {/* ================= DOMINANT MAP CANVAS ================= */}
+      {/* Dominant Real Map Canvas */}
       <View style={styles.mapCanvas}>
-        {/* Subtle Coordinates Grid */}
-        <View style={styles.gridOverlay}>
-          <View style={[styles.gridLineH, { top: '30%' }]} />
-          <View style={[styles.gridLineH, { top: '60%' }]} />
-          <View style={[styles.gridLineV, { left: '33%' }]} />
-          <View style={[styles.gridLineV, { left: '66%' }]} />
-        </View>
-
-        {/* Topographic Rings */}
-        <View style={styles.topographicLayer}>
-          <View style={[styles.contourRing, styles.c1]} />
-          <View style={[styles.contourRing, styles.c2]} />
-          <View style={[styles.contourRing, styles.c3]} />
-        </View>
-
-        {/* Boundary Perimeter */}
-        <View style={styles.boundaryRing}>
-          <Text style={styles.boundaryText}>ZONE PERIMETER // R-400M</Text>
-        </View>
-
-        {/* Tactical Objective 03 (Active Focus) */}
-        <View style={[styles.targetObjective, { top: '42%', left: '52%' }]}>
-          <View style={styles.targetVector} />
-          <View
-            style={[
-              styles.targetBracket,
-              objectiveCaptured && styles.targetBracketSecured,
-            ]}
-          >
-            <View
-              style={[
-                styles.targetCore,
-                objectiveCaptured && styles.targetCoreSecured,
-              ]}
-            />
-          </View>
-          <Text style={styles.targetLabel}>
-            {objectiveCaptured ? 'OBJ 03 [SECURED]' : 'OBJ 03 [THE SIGNAL]'}
-          </Text>
-          <Text style={styles.targetDistance}>
-            {objectiveCaptured ? '+100 PTS' : '14 m // IN RANGE'}
-          </Text>
-        </View>
-
-        {/* Field Agent (Player) Location */}
-        <View style={[styles.playerContainer, { top: '55%', left: '44%' }]}>
-          <Animated.View
-            style={[
-              styles.radarPing,
-              {
-                transform: [{ scale: pulseScale }],
-                opacity: pulseOpacity,
-              },
-            ]}
-          />
-          <View style={styles.playerOuterRing}>
-            <View style={styles.playerPip} />
-            <View style={styles.playerDot} />
-          </View>
-          <View style={styles.playerTag}>
-            <Text style={styles.playerTagText}>AGENT 09</Text>
-          </View>
-        </View>
-
-        {/* Realtime Proximity HUD overlay */}
-        <View style={styles.telemetryOverlay}>
-          <Text style={styles.telemetryCoord}>GPS ACCURACY: ±2.8M</Text>
-          <Text style={styles.telemetryBearing}>BEARING: 042° NE</Text>
-        </View>
+        <RuinsMap
+          playerLocation={playerLocation}
+          objectives={objectives}
+          boundaryCenter={boundaryCenter}
+          boundaryRadiusMeters={game?.boundaryRadiusMeters || 400}
+          selectedObjectiveId={selectedObjective?.id}
+          onSelectObjective={(obj) => setSelectedObjective(obj)}
+          hasLocationPermission={true}
+          onRequestPermission={() => {}}
+          isLocationServicesEnabled={true}
+        />
       </View>
 
-      {/* ================= ACTIVE OBJECTIVE & ACTION PANEL ================= */}
+      {/* Active Objective Interaction Panel */}
       <View style={styles.actionPanel}>
         <Card accentTop>
           <View style={styles.cardPadding}>
+            {errorMsg && (
+              <Text style={styles.errorText}>// {errorMsg}</Text>
+            )}
+
             <View style={styles.objectiveInfoRow}>
               <View>
                 <View style={styles.badgeRow}>
-                  <Text style={styles.objMeta}>OBJECTIVE 03</Text>
+                  <Text style={styles.objMeta}>{selectedObjective?.code || 'OBJ 01'}</Text>
                   <Badge
-                    label={objectiveCaptured ? 'SECURED' : 'PROXIMITY LOCK'}
-                    variant={objectiveCaptured ? 'green' : 'titanium'}
+                    label={
+                      selectedObjective?.status === 'SECURED'
+                        ? 'SECURED'
+                        : isWithinRange
+                        ? 'PROXIMITY LOCK'
+                        : 'EN ROUTE'
+                    }
+                    variant={
+                      selectedObjective?.status === 'SECURED'
+                        ? 'green'
+                        : isWithinRange
+                        ? 'titanium'
+                        : 'muted'
+                    }
                     style={{ marginLeft: 8 }}
                   />
                 </View>
-                <Text style={styles.objName}>THE SIGNAL</Text>
-                <Text style={styles.objValue}>VALUE: 100 POINTS // SECTOR 03</Text>
+                <Text style={styles.objName}>
+                  {selectedObjective?.title || 'SECTOR NODE'}
+                </Text>
+                <Text style={styles.objValue}>
+                  VALUE: {selectedObjective?.points || 100} POINTS // {targetBearing}
+                </Text>
               </View>
 
               <View style={styles.proximityDigits}>
-                <Text style={styles.distanceHuge}>14 m</Text>
-                <Text style={styles.distanceSub}>IN RADIUS</Text>
+                <Text style={styles.distanceHuge}>{Math.round(targetDistance)} m</Text>
+                <Text style={styles.distanceSub}>
+                  {isWithinRange ? 'IN RANGE' : 'RANGE'}
+                </Text>
               </View>
             </View>
 
@@ -214,28 +314,42 @@ export const ActiveGameScreen: React.FC = () => {
               </View>
             )}
 
-            {/* Interaction Button */}
-            {!objectiveCaptured ? (
+            {/* Interactive Capture Action */}
+            {selectedObjective?.status !== 'SECURED' ? (
               <Button
-                label={capturing ? `SYNCHRONIZING... ${captureProgress}%` : 'COMMENCE EXTRACTION'}
-                variant={capturing ? 'secondary' : 'primary'}
-                onPress={() => setCapturing(true)}
-                disabled={capturing}
+                label={
+                  capturing
+                    ? `VERIFYING TELEMETRY... ${captureProgress}%`
+                    : isWithinRange
+                    ? 'COMMENCE EXTRACTION'
+                    : `MOVE WITHIN ${selectedObjective?.captureRadiusMeters || 20}M TO CAPTURE`
+                }
+                variant={isWithinRange ? 'primary' : 'secondary'}
+                disabled={!isWithinRange || capturing}
+                onPress={handleCommenceCapture}
                 style={{ marginTop: 12 }}
               />
             ) : (
               <Button
-                label="OBJECTIVE SECURED // REDEPLOY"
+                label="OBJECTIVE SECURED // SELECT NEXT NODE"
                 variant="outline"
-                onPress={() => {}}
+                onPress={() => {
+                  const nextActive = objectives.find((o) => o.status === 'ACTIVE');
+                  if (nextActive) setSelectedObjective(nextActive);
+                }}
                 style={{ marginTop: 12 }}
               />
             )}
 
-            {/* Abort / Finish Mission */}
+            {/* Cease Mission Action */}
             <TouchableOpacity
               style={styles.abortBtn}
-              onPress={handleEndMission}
+              onPress={() =>
+                navigate('RESULTS', {
+                  matchId: gameId || 'game-01',
+                  outcome: scoreAlpha >= scoreOmega ? 'VICTORY' : 'DEFEAT',
+                })
+              }
               activeOpacity={0.7}
             >
               <Text style={styles.abortText}>CEASE ENGAGEMENT // VIEW RESULTS</Text>
@@ -251,6 +365,17 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: PALETTE.obsidian,
+  },
+  center: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingText: {
+    fontFamily: FONTS.mono,
+    fontSize: 9,
+    color: PALETTE.titanium,
+    letterSpacing: 2,
+    marginTop: 14,
   },
   hudTopBar: {
     paddingHorizontal: 16,
@@ -304,212 +429,27 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     marginTop: 2,
   },
-
   mapCanvas: {
     flex: 1,
-    position: 'relative',
     margin: 10,
-    backgroundColor: '#0A0C0E',
     borderRadius: 6,
+    overflow: 'hidden',
     borderWidth: 0.5,
     borderColor: PALETTE.borderHairline,
-    overflow: 'hidden',
   },
-  gridOverlay: {
-    ...StyleSheet.absoluteFill,
-  },
-  gridLineH: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    height: 0.5,
-    backgroundColor: 'rgba(255, 255, 255, 0.03)',
-  },
-  gridLineV: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    width: 0.5,
-    backgroundColor: 'rgba(255, 255, 255, 0.03)',
-  },
-  topographicLayer: {
-    ...StyleSheet.absoluteFill,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  contourRing: {
-    position: 'absolute',
-    borderWidth: 0.5,
-    borderColor: 'rgba(200, 190, 170, 0.04)',
-  },
-  c1: {
-    width: SCREEN_WIDTH * 0.5,
-    height: SCREEN_WIDTH * 0.45,
-    borderRadius: SCREEN_WIDTH * 0.25,
-  },
-  c2: {
-    width: SCREEN_WIDTH * 0.85,
-    height: SCREEN_WIDTH * 0.75,
-    borderRadius: SCREEN_WIDTH * 0.42,
-  },
-  c3: {
-    width: SCREEN_WIDTH * 1.2,
-    height: SCREEN_WIDTH * 1.1,
-    borderRadius: SCREEN_WIDTH * 0.6,
-  },
-  boundaryRing: {
-    position: 'absolute',
-    alignSelf: 'center',
-    top: '15%',
-    width: SCREEN_WIDTH * 0.8,
-    height: SCREEN_WIDTH * 0.8,
-    borderRadius: (SCREEN_WIDTH * 0.8) / 2,
-    borderWidth: 0.8,
-    borderColor: 'rgba(200, 190, 170, 0.25)',
-    borderStyle: 'dashed',
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    paddingTop: 6,
-  },
-  boundaryText: {
-    fontFamily: FONTS.mono,
-    fontSize: 7.5,
-    color: PALETTE.titaniumMuted,
-    letterSpacing: 1.5,
-    backgroundColor: '#0A0C0E',
-    paddingHorizontal: 4,
-  },
-
-  targetObjective: {
-    position: 'absolute',
-    alignItems: 'center',
-    transform: [{ translateX: -15 }, { translateY: -15 }],
-  },
-  targetVector: {
-    position: 'absolute',
-    width: 40,
-    height: 0.5,
-    backgroundColor: 'rgba(200, 190, 170, 0.3)',
-    top: 6,
-    left: -28,
-    transform: [{ rotate: '48deg' }],
-  },
-  targetBracket: {
-    width: 22,
-    height: 22,
-    borderWidth: 0.8,
-    borderColor: PALETTE.titanium,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: PALETTE.titaniumGlass,
-  },
-  targetBracketSecured: {
-    borderColor: PALETTE.accentGreen,
-    backgroundColor: 'rgba(74, 222, 128, 0.1)',
-  },
-  targetCore: {
-    width: 4,
-    height: 4,
-    backgroundColor: PALETTE.titanium,
-  },
-  targetCoreSecured: {
-    backgroundColor: PALETTE.accentGreen,
-  },
-  targetLabel: {
-    fontFamily: FONTS.mono,
-    fontSize: 8,
-    fontWeight: '700',
-    color: PALETTE.titanium,
-    letterSpacing: 1,
-    marginTop: 4,
-  },
-  targetDistance: {
-    fontFamily: FONTS.mono,
-    fontSize: 7.5,
-    color: PALETTE.textFog,
-    letterSpacing: 0.5,
-  },
-
-  playerContainer: {
-    position: 'absolute',
-    alignItems: 'center',
-    justifyContent: 'center',
-    transform: [{ translateX: -12 }, { translateY: -12 }],
-  },
-  radarPing: {
-    position: 'absolute',
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    borderWidth: 0.8,
-    borderColor: PALETTE.titanium,
-    backgroundColor: PALETTE.titaniumGlow,
-  },
-  playerOuterRing: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: PALETTE.textFog,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(8, 9, 11, 0.85)',
-  },
-  playerPip: {
-    position: 'absolute',
-    top: 1,
-    width: 2,
-    height: 4,
-    backgroundColor: PALETTE.titanium,
-  },
-  playerDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: PALETTE.titanium,
-  },
-  playerTag: {
-    marginTop: 6,
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    backgroundColor: 'rgba(8, 9, 11, 0.8)',
-    borderRadius: 2,
-  },
-  playerTagText: {
-    fontFamily: FONTS.mono,
-    fontSize: 7,
-    color: PALETTE.textFog,
-    letterSpacing: 1,
-  },
-
-  telemetryOverlay: {
-    position: 'absolute',
-    bottom: 8,
-    left: 8,
-    padding: 6,
-    backgroundColor: 'rgba(8, 9, 11, 0.7)',
-    borderRadius: 3,
-  },
-  telemetryCoord: {
-    fontFamily: FONTS.mono,
-    fontSize: 7.5,
-    color: PALETTE.textSecondary,
-    letterSpacing: 1,
-  },
-  telemetryBearing: {
-    fontFamily: FONTS.mono,
-    fontSize: 7.5,
-    color: PALETTE.titaniumMuted,
-    letterSpacing: 1,
-    marginTop: 2,
-  },
-
   actionPanel: {
     paddingHorizontal: 12,
     paddingBottom: 14,
   },
   cardPadding: {
     padding: 14,
+  },
+  errorText: {
+    fontFamily: FONTS.mono,
+    fontSize: 8,
+    color: PALETTE.accentRed,
+    letterSpacing: 1,
+    marginBottom: 8,
   },
   objectiveInfoRow: {
     flexDirection: 'row',

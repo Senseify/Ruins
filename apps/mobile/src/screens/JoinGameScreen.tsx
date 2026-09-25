@@ -7,6 +7,8 @@ import {
 } from 'react-native';
 import { PALETTE, FONTS } from '../theme/colors';
 import { useNavigation } from '../navigation/NavigationContext';
+import { useAuth } from '../context/AuthContext';
+import { apiClient } from '../services/apiClient';
 import { Header } from '../components/Header';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
@@ -14,21 +16,44 @@ import { Input } from '../components/Input';
 
 export const JoinGameScreen: React.FC = () => {
   const { navigate } = useNavigation();
+  const { user, loginAsQuickOperative } = useAuth();
+
   const [code, setCode] = useState('');
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const recentCodes = ['RUIN42', 'ECHO09', 'VOID88'];
+  const recentCodes = ['RN42', 'ECHO', 'VOID'];
 
-  const handleJoin = () => {
-    if (code.trim().length !== 6) {
-      setError('ROOM CODE MUST BE EXACTLY 6 ALPHANUMERIC CHARACTERS');
+  const handleJoin = async () => {
+    if (code.trim().length < 4) {
+      setError('VALIDATION_ERROR: Room code must be at least 4 characters');
       return;
     }
+
+    setLoading(true);
     setError(null);
-    navigate('LOBBY', {
-      gameId: 'custom-session',
-      roomCode: code.toUpperCase(),
-    });
+
+    // Auto authenticate as operative if needed
+    if (!user) {
+      const authRes = await loginAsQuickOperative();
+      if (!authRes.success) {
+        setError('Authentication required to join theater');
+        setLoading(false);
+        return;
+      }
+    }
+
+    const res = await apiClient.games.join(code.trim().toUpperCase());
+    setLoading(false);
+
+    if (res.data?.game) {
+      navigate('LOBBY', {
+        gameId: res.data.game.id,
+        roomCode: res.data.game.roomCode,
+      });
+    } else {
+      setError(res.error || 'Failed to connect to operation');
+    }
   };
 
   const handleSelectRecent = (val: string) => {
@@ -54,21 +79,21 @@ export const JoinGameScreen: React.FC = () => {
               if (error) setError(null);
             }}
             placeholder="XXXXXX"
-            maxLength={6}
+            maxLength={8}
             autoCapitalize="characters"
             autoCorrect={false}
             style={styles.codeInput}
             error={error ?? undefined}
           />
           <Text style={styles.inputHint}>
-            OBTAIN CODE FROM THE HOST AGENT OR SECTOR DISPATCH
+            OBTAIN CODE FROM THE HOST AGENT OR SECTOR DIRECTORY
           </Text>
 
           <Button
-            label="AUTHENTICATE & ENTER"
+            label={loading ? 'VERIFYING WITH SATELLITE...' : 'AUTHENTICATE & ENTER'}
             variant="primary"
             size="lg"
-            disabled={code.trim().length < 4}
+            disabled={code.trim().length < 3 || loading}
             onPress={handleJoin}
             style={{ marginTop: 14 }}
           />
@@ -76,7 +101,7 @@ export const JoinGameScreen: React.FC = () => {
 
         {/* Recent Codes */}
         <View style={styles.recentSection}>
-          <Text style={styles.recentTitle}>RECENT ENCOUNTER CODES</Text>
+          <Text style={styles.recentTitle}>QUICK ENCOUNTER SHORTCUTS</Text>
           <View style={styles.recentRow}>
             {recentCodes.map((item) => (
               <TouchableOpacity

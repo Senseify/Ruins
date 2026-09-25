@@ -8,15 +8,27 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import { PALETTE, FONTS } from '../theme/colors';
+import { useAuth } from '../context/AuthContext';
+import { apiClient } from '../services/apiClient';
 import { Header } from '../components/Header';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
+import { Input } from '../components/Input';
 
 export const SettingsScreen: React.FC = () => {
+  const { user, logout } = useAuth();
+
   const [audioTelemetry, setAudioTelemetry] = useState(true);
   const [hapticAlerts, setHapticAlerts] = useState(true);
   const [highAccuracyGps, setHighAccuracyGps] = useState(true);
-  const [cartographyNoir, setCartographyNoir] = useState(true);
+  const [serverUrl, setServerUrl] = useState(apiClient.getBaseUrl());
+  const [urlSaved, setUrlSaved] = useState(false);
+
+  const handleSaveUrl = () => {
+    apiClient.setBaseUrl(serverUrl.trim());
+    setUrlSaved(true);
+    setTimeout(() => setUrlSaved(false), 2000);
+  };
 
   return (
     <View style={styles.container}>
@@ -27,6 +39,27 @@ export const SettingsScreen: React.FC = () => {
       />
 
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        {/* Network Endpoint Configuration */}
+        <View style={styles.sectionBlock}>
+          <Text style={styles.sectionTitle}>SATELLITE DISPATCH ENDPOINT</Text>
+          <Card style={styles.settingCard}>
+            <Input
+              label="BACKEND API URL"
+              value={serverUrl}
+              onChangeText={setServerUrl}
+              placeholder="http://192.168.x.x:3001"
+              autoCapitalize="none"
+              autoCorrect={false}
+              hint="Use your machine's LAN IP when testing on a physical phone via Expo Go."
+            />
+            <Button
+              label={urlSaved ? 'ENDPOINT UPDATED [✓]' : 'APPLY ENDPOINT'}
+              variant="outline"
+              onPress={handleSaveUrl}
+            />
+          </Card>
+        </View>
+
         {/* Sensory Telemetry Section */}
         <View style={styles.sectionBlock}>
           <Text style={styles.sectionTitle}>SENSORY & AUDIO FEEDBACK</Text>
@@ -75,7 +108,7 @@ export const SettingsScreen: React.FC = () => {
               <View style={styles.settingMeta}>
                 <Text style={styles.settingLabel}>HIGH-PRECISION SATELLITE LOCK</Text>
                 <Text style={styles.settingDesc}>
-                  1 Hz GPS polling. Disable to conserve battery during extended missions.
+                  1 Hz GPS polling during active missions. Automatically throttles when standby.
                 </Text>
               </View>
               <Switch
@@ -83,23 +116,6 @@ export const SettingsScreen: React.FC = () => {
                 onValueChange={setHighAccuracyGps}
                 trackColor={{ false: '#1c1f24', true: PALETTE.borderActive }}
                 thumbColor={highAccuracyGps ? PALETTE.titanium : '#444850'}
-              />
-            </View>
-
-            <View style={styles.divider} />
-
-            <View style={styles.settingRow}>
-              <View style={styles.settingMeta}>
-                <Text style={styles.settingLabel}>OBSIDIAN NOIR CARTOGRAPHY</Text>
-                <Text style={styles.settingDesc}>
-                  Monochrome vector rendering for OLED power efficiency outdoors.
-                </Text>
-              </View>
-              <Switch
-                value={cartographyNoir}
-                onValueChange={setCartographyNoir}
-                trackColor={{ false: '#1c1f24', true: PALETTE.borderActive }}
-                thumbColor={cartographyNoir ? PALETTE.titanium : '#444850'}
               />
             </View>
           </Card>
@@ -119,20 +135,16 @@ export const SettingsScreen: React.FC = () => {
         </View>
 
         {/* Session Maintenance */}
-        <View style={styles.sectionBlock}>
-          <Text style={styles.sectionTitle}>SESSION MANAGEMENT</Text>
-          <Button
-            label="PURGE OFFLINE CACHE"
-            variant="secondary"
-            onPress={() => {}}
-            style={{ marginBottom: 10 }}
-          />
-          <Button
-            label="DISENGAGE OPERATIVE SESSION"
-            variant="danger"
-            onPress={() => {}}
-          />
-        </View>
+        {user && (
+          <View style={styles.sectionBlock}>
+            <Text style={styles.sectionTitle}>SESSION MANAGEMENT</Text>
+            <Button
+              label={`DISENGAGE OPERATIVE (${user.username.toUpperCase()})`}
+              variant="danger"
+              onPress={logout}
+            />
+          </View>
+        )}
       </ScrollView>
     </View>
   );

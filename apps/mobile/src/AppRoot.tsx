@@ -2,6 +2,7 @@ import React from 'react';
 import { StyleSheet, View, SafeAreaView, StatusBar, Platform } from 'react-native';
 import { PALETTE } from './theme/colors';
 import { NavigationProvider, useNavigation } from './navigation/NavigationContext';
+import { AuthProvider } from './context/AuthContext';
 import { BottomNav } from './components/BottomNav';
 
 // Screens
@@ -61,9 +62,11 @@ export const AppRoot: React.FC = () => {
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor={PALETTE.obsidian} />
       <SafeAreaView style={styles.safeArea}>
-        <NavigationProvider>
-          <ScreenRouter />
-        </NavigationProvider>
+        <AuthProvider>
+          <NavigationProvider>
+            <ScreenRouter />
+          </NavigationProvider>
+        </AuthProvider>
       </SafeAreaView>
     </View>
   );

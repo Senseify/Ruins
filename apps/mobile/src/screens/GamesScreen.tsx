@@ -1,76 +1,60 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
   View,
   ScrollView,
   TouchableOpacity,
+  RefreshControl,
 } from 'react-native';
 import { PALETTE, FONTS } from '../theme/colors';
 import { useNavigation } from '../navigation/NavigationContext';
+import { useAuth } from '../context/AuthContext';
+import { apiClient } from '../services/apiClient';
 import { Header } from '../components/Header';
 import { Card } from '../components/Card';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 import { Input } from '../components/Input';
 
-interface MockGameItem {
-  id: string;
-  roomCode: string;
-  title: string;
-  mode: string;
-  radiusMeters: number;
-  playersCount: number;
-  maxPlayers: number;
-  status: 'LOBBY' | 'ACTIVE';
-  distanceMeters: number;
-  timeRemaining?: string;
-}
-
-const MOCK_GAMES: MockGameItem[] = [
-  {
-    id: 'game-01',
-    roomCode: 'RUIN42',
-    title: 'OPERATION CONVERGENCE',
-    mode: 'CONVERGENCE',
-    radiusMeters: 400,
-    playersCount: 3,
-    maxPlayers: 8,
-    status: 'LOBBY',
-    distanceMeters: 65,
-  },
-  {
-    id: 'game-02',
-    roomCode: 'ECHO09',
-    title: 'DISTRICT 07 PURGE',
-    mode: 'CONVERGENCE',
-    radiusMeters: 800,
-    playersCount: 6,
-    maxPlayers: 8,
-    status: 'ACTIVE',
-    distanceMeters: 280,
-    timeRemaining: '18:42',
-  },
-  {
-    id: 'game-03',
-    roomCode: 'VOID88',
-    title: 'HARBOR EXTRACTION',
-    mode: 'CONVERGENCE',
-    radiusMeters: 300,
-    playersCount: 2,
-    maxPlayers: 4,
-    status: 'LOBBY',
-    distanceMeters: 510,
-  },
-];
-
 export const GamesScreen: React.FC = () => {
   const { navigate } = useNavigation();
-  const [quickCode, setQuickCode] = useState('');
+  const { user, loginAsQuickOperative } = useAuth();
 
-  const handleQuickJoin = () => {
+  const [games, setGames] = useState<any[]>([]);
+  const [quickCode, setQuickCode] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const fetchGames = async () => {
+    setLoading(true);
+    const res = await apiClient.games.list();
+    if (res.data?.games) {
+      setGames(res.data.games);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    fetchGames();
+  }, []);
+
+  const handleQuickJoin = async () => {
+    if (!user) {
+      await loginAsQuickOperative();
+    }
+
     if (quickCode.trim().length >= 4) {
-      navigate('LOBBY', { gameId: 'custom', roomCode: quickCode.toUpperCase() });
+      setErrorMsg(null);
+      const res = await apiClient.games.join(quickCode.toUpperCase());
+      if (res.data?.game) {
+        navigate('LOBBY', {
+          gameId: res.data.game.id,
+          roomCode: res.data.game.roomCode,
+        });
+      } else {
+        setErrorMsg(res.error || 'Failed to join match');
+      }
     }
   };
 
@@ -78,13 +62,21 @@ export const GamesScreen: React.FC = () => {
     <View style={styles.container}>
       <Header
         title="OPERATIONS"
-        subtitle="THEATER DIRECTORY // LOCAL SECTOR"
-        rightAction={
-          <Badge label="3 NEARBY" variant="titanium" />
-        }
+        subtitle="THEATER DIRECTORY // SATELLITE FEED"
+        rightAction={<Badge label={`${games.length} ACTIVE`} variant="titanium" />}
       />
 
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={loading}
+            onRefresh={fetchGames}
+            tintColor={PALETTE.titanium}
+          />
+        }
+      >
         {/* Quick Actions Row */}
         <View style={styles.actionRow}>
           <Button
@@ -107,12 +99,16 @@ export const GamesScreen: React.FC = () => {
             <View style={{ flex: 1, marginRight: 10 }}>
               <Input
                 label="DIRECT PROTOCOL JOIN"
-                placeholder="6-DIGIT ROOM CODE"
+                placeholder="ROOM CODE"
                 value={quickCode}
-                onChangeText={(text) => setQuickCode(text.toUpperCase())}
+                onChangeText={(text) => {
+                  setQuickCode(text.toUpperCase());
+                  if (errorMsg) setErrorMsg(null);
+                }}
                 maxLength={6}
                 autoCapitalize="characters"
                 style={styles.quickInput}
+                error={errorMsg ?? undefined}
               />
             </View>
             <Button
@@ -125,13 +121,22 @@ export const GamesScreen: React.FC = () => {
           </View>
         </Card>
 
-        {/* Available Operations Section */}
+        {/* Active Operations List */}
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>ACTIVE SECTOR SESSIONS</Text>
-          <Text style={styles.sectionSubtitle}>BROADCAST RANGE: 1.0 KM</Text>
+          <Text style={styles.sectionSubtitle}>BROADCAST RANGE: 20 KM</Text>
         </View>
 
-        {MOCK_GAMES.map((game) => (
+        {games.length === 0 && !loading && (
+          <Card style={styles.emptyCard}>
+            <Text style={styles.emptyTitle}>NO ACTIVE THEATERS IN RANGE</Text>
+            <Text style={styles.emptySubtitle}>
+              Create a new operation or invite nearby field agents with a room code.
+            </Text>
+          </Card>
+        )}
+
+        {games.map((game) => (
           <TouchableOpacity
             key={game.id}
             activeOpacity={0.8}
@@ -158,18 +163,14 @@ export const GamesScreen: React.FC = () => {
                 </View>
 
                 <View style={styles.distanceBlock}>
-                  <Text style={styles.distanceValue}>{game.distanceMeters} m</Text>
-                  <Text style={styles.distanceLabel}>RANGE</Text>
+                  <Text style={styles.distanceValue}>R-{game.boundaryRadiusMeters}M</Text>
+                  <Text style={styles.distanceLabel}>PERIMETER</Text>
                 </View>
               </View>
 
               <View style={styles.cardFooter}>
-                <Text style={styles.footerMeta}>
-                  MODE: {game.mode} // R-{game.radiusMeters}M
-                </Text>
-                <Text style={styles.footerMeta}>
-                  AGENTS: {game.playersCount}/{game.maxPlayers}
-                </Text>
+                <Text style={styles.footerMeta}>MODE: {game.mode}</Text>
+                <Text style={styles.footerMeta}>TIMEFRAME: {Math.round(game.durationSeconds / 60)}M</Text>
               </View>
             </Card>
           </TouchableOpacity>
@@ -225,6 +226,26 @@ const styles = StyleSheet.create({
     letterSpacing: 1.2,
     marginTop: 2,
   },
+  emptyCard: {
+    padding: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyTitle: {
+    fontFamily: FONTS.mono,
+    fontSize: 11,
+    fontWeight: '700',
+    color: PALETTE.textSecondary,
+    letterSpacing: 1.5,
+    marginBottom: 6,
+  },
+  emptySubtitle: {
+    fontFamily: FONTS.mono,
+    fontSize: 8.5,
+    color: PALETTE.textTertiary,
+    textAlign: 'center',
+    lineHeight: 13,
+  },
   gameCard: {
     padding: 14,
     marginBottom: 12,
@@ -259,7 +280,7 @@ const styles = StyleSheet.create({
   },
   distanceValue: {
     fontFamily: FONTS.mono,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
     color: PALETTE.textFog,
   },
