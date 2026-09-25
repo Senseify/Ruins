@@ -70,11 +70,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const loginAsQuickOperative = async () => {
-    const randomSuffix = Math.floor(100 + Math.random() * 900);
+    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
     const username = `Agent_${randomSuffix}`;
     const email = `agent${randomSuffix}@ruins.network`;
-    const password = 'Password123!';
-    return register(username, email, password, `Operative ${randomSuffix}`);
+    const dynamicSecurePassword = `${Math.random().toString(36).substring(2)}${Math.random().toString(36).substring(2)}!A1`;
+    return register(username, email, dynamicSecurePassword, `Operative ${randomSuffix}`);
   };
 
   const logout = async () => {

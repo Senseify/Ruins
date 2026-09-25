@@ -19,7 +19,9 @@ class RealtimeClient {
     if (gameId) this.currentGameId = gameId;
 
     const baseUrl = apiClient.getBaseUrl();
-    const wsUrl = baseUrl.replace(/^http/, 'ws') + '/ws';
+    const wsUrl =
+      process.env.EXPO_PUBLIC_WS_URL ||
+      baseUrl.replace(/^http/, 'ws') + '/ws';
 
     try {
       this.socket = new WebSocket(wsUrl);

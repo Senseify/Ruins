@@ -1,6 +1,6 @@
 -- ============================================================================
--- RUINS Migration 001: Initial Geospatial Schema
--- PostgreSQL 15+ with PostGIS extension
+-- RUINS Complete Production Migration Schema
+-- PostgreSQL 15+ with PostGIS Extension
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -22,13 +22,13 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 2. Games / Matches Table
+-- 2. Games / Operations Table
 CREATE TABLE IF NOT EXISTS games (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     host_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     room_code VARCHAR(6) UNIQUE NOT NULL,
     title VARCHAR(64) NOT NULL,
-    mode VARCHAR(32) NOT NULL DEFAULT 'CONVERGENCE',
+    mode VARCHAR(32) NOT NULL DEFAULT 'CONVERGENCE', -- 'CONVERGENCE', 'HUNT', 'EXTRACTION', 'TERRITORY', 'RELAY'
     status VARCHAR(16) NOT NULL DEFAULT 'LOBBY', -- 'LOBBY', 'ACTIVE', 'COMPLETED', 'ABORTED'
     boundary_lat DOUBLE PRECISION NOT NULL,
     boundary_lng DOUBLE PRECISION NOT NULL,
@@ -74,30 +74,109 @@ CREATE TABLE IF NOT EXISTS objectives (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 5. Game Sessions / Socket Heartbeats
-CREATE TABLE IF NOT EXISTS game_sessions (
+-- 5. Match Results (Phase 9: Persistent Debriefs)
+CREATE TABLE IF NOT EXISTS match_results (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    game_id UUID NOT NULL REFERENCES games(id) ON DELETE CASCADE,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    socket_id VARCHAR(128),
-    is_online BOOLEAN DEFAULT TRUE,
-    connected_at TIMESTAMPTZ DEFAULT NOW(),
-    last_heartbeat_at TIMESTAMPTZ DEFAULT NOW()
+    game_id UUID UNIQUE NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    room_code VARCHAR(6) NOT NULL,
+    title VARCHAR(64) NOT NULL,
+    mode VARCHAR(32) NOT NULL,
+    outcome VARCHAR(16) NOT NULL, -- 'VICTORY', 'DEFEAT', 'DRAW'
+    winning_team_index INT,
+    score_team_alpha INT DEFAULT 0,
+    score_team_omega INT DEFAULT 0,
+    duration_seconds INT NOT NULL,
+    completed_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 6. Game Events Log (Server Authoritative Audit Trail)
-CREATE TABLE IF NOT EXISTS game_events (
+-- 6. Player Match Statistics & Placement (Phase 9)
+CREATE TABLE IF NOT EXISTS player_match_results (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    game_id UUID NOT NULL REFERENCES games(id) ON DELETE CASCADE,
-    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-    event_type VARCHAR(64) NOT NULL, -- e.g. 'OBJECTIVE_CAPTURED', 'PLAYER_JOINED'
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    match_result_id UUID NOT NULL REFERENCES match_results(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    username VARCHAR(32) NOT NULL,
+    team_index INT NOT NULL,
+    placement INT NOT NULL,
+    score INT NOT NULL,
+    objectives_captured INT NOT NULL,
+    distance_traveled_meters DOUBLE PRECISION NOT NULL,
+    xp_earned INT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Indexes for high performance lookup
+-- 7. User Generated Content (Phase 13: UGC Custom Games)
+CREATE TABLE IF NOT EXISTS ugc_games (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    creator_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(64) NOT NULL,
+    description TEXT NOT NULL,
+    mode VARCHAR(32) NOT NULL,
+    boundary_lat DOUBLE PRECISION NOT NULL,
+    boundary_lng DOUBLE PRECISION NOT NULL,
+    boundary_radius_meters INT NOT NULL,
+    duration_minutes INT NOT NULL,
+    max_players INT NOT NULL DEFAULT 8,
+    objectives JSONB NOT NULL DEFAULT '[]'::jsonb,
+    status VARCHAR(16) NOT NULL DEFAULT 'DRAFT', -- 'DRAFT', 'PUBLISHED', 'ARCHIVED', 'REPORTED'
+    report_count INT DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 8. Parties & Social Squads (Phase 12)
+CREATE TABLE IF NOT EXISTS parties (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    party_code VARCHAR(6) UNIQUE NOT NULL,
+    leader_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    current_game_id UUID REFERENCES games(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS party_members (
+    party_id UUID NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    joined_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (party_id, user_id)
+);
+
+-- 9. Friends & Relationships (Phase 12)
+CREATE TABLE IF NOT EXISTS friends (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    friend_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status VARCHAR(16) NOT NULL DEFAULT 'PENDING', -- 'PENDING', 'ACCEPTED', 'BLOCKED'
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (user_id, friend_id)
+);
+
+-- 10. Anti-Cheat & Telemetry Audit Trail (Phase 10)
+CREATE TABLE IF NOT EXISTS anti_cheat_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    game_id UUID REFERENCES games(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    incident_type VARCHAR(32) NOT NULL, -- 'SPEED_ANOMALY', 'OUT_OF_BOUNDS', 'SPOOF_FLAG'
+    calculated_value DOUBLE PRECISION,
+    threshold_value DOUBLE PRECISION,
+    payload JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 11. Game Audit Events Trail
+CREATE TABLE IF NOT EXISTS game_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    game_id UUID REFERENCES games(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    event_type VARCHAR(64) NOT NULL,
+    payload JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes for spatial, search, and lookups
 CREATE INDEX IF NOT EXISTS idx_games_room_code ON games(room_code);
 CREATE INDEX IF NOT EXISTS idx_games_status ON games(status);
-CREATE INDEX IF NOT EXISTS idx_game_players_user ON game_players(user_id);
-CREATE INDEX IF NOT EXISTS idx_objectives_game ON objectives(game_id);
+CREATE INDEX IF NOT EXISTS idx_ugc_status ON ugc_games(status);
+CREATE INDEX IF NOT EXISTS idx_match_results_game ON match_results(game_id);
+CREATE INDEX IF NOT EXISTS idx_player_match_user ON player_match_results(user_id);
+CREATE INDEX IF NOT EXISTS idx_friends_user ON friends(user_id);
 CREATE INDEX IF NOT EXISTS idx_game_events_game ON game_events(game_id);
+

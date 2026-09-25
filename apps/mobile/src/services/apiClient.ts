@@ -12,7 +12,8 @@ const TOKEN_KEY = '@ruins_auth_token';
 // Android emulator uses 10.0.2.2 to access host machine; iOS uses localhost
 const DEFAULT_HOST =
   Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
-let API_BASE_URL = `http://${DEFAULT_HOST}:3001`;
+let API_BASE_URL =
+  process.env.EXPO_PUBLIC_API_URL || `http://${DEFAULT_HOST}:3001`;
 
 class ApiClient {
   private token: string | null = null;

@@ -1,0 +1,41 @@
+services:
+  ruins-db:
+    image: postgis/postgis:16-3.4
+    container_name: ruins-postgres-postgis
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ruins_secure_db_password
+      POSTGRES_DB: ruins
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./apps/server/migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ruins"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ruins-server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    container_name: ruins-backend
+    restart: always
+    depends_on:
+      ruins-db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      HOST: 0.0.0.0
+      DATABASE_URL: postgresql://postgres:ruins_secure_db_password@ruins-db:5432/ruins
+      JWT_SECRET: ${JWT_SECRET:-ruins_super_secret_production_key_minimum_32_chars_long}
+      CORS_ORIGIN: "*"
+    ports:
+      - "3001:3001"
+
+volumes:
+  pgdata:

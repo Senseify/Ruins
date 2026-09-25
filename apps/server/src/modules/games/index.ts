@@ -1,12 +1,13 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import crypto from 'crypto';
+import { GameMode } from '@ruins/shared';
 import { db, UserRecord, GameRecord } from '../../db';
 import { requireAuth } from '../auth';
 import {
   calculateHaversineDistance,
   validateKinematicSpeed,
-  generateProceduralObjectives,
 } from '../../utils/geo';
+import { gameModeRegistry } from '../game-modes';
 import { realtimeManager } from '../../realtime';
 
 function generateRoomCode(): string {
@@ -23,7 +24,7 @@ export async function gameRoutes(server: FastifyInstance) {
   server.post<{
     Body: {
       title?: string;
-      mode?: string;
+      mode?: GameMode;
       boundaryRadiusMeters?: number;
       durationMinutes?: number;
       centerLat?: number;
@@ -62,23 +63,17 @@ export async function gameRoutes(server: FastifyInstance) {
     // Add host as player
     await db.addPlayerToGame(game.id, user.id, true, 0);
 
-    // Generate procedural objectives distributed safely within perimeter
-    const objectivesData = generateProceduralObjectives(
+    // Initialize objectives using pluggable GameModeHandler
+    const modeHandler = gameModeRegistry.get(mode);
+    const objectivesData = modeHandler.initializeObjectives(
       { latitude: centerLat, longitude: centerLng },
-      boundaryRadiusMeters,
-      3
+      boundaryRadiusMeters
     );
 
     const objectives = await db.createObjectives(
       objectivesData.map((obj) => ({
+        ...obj,
         gameId: game.id,
-        code: obj.code,
-        title: obj.title,
-        latitude: obj.latitude,
-        longitude: obj.longitude,
-        captureRadiusMeters: obj.captureRadiusMeters,
-        points: obj.points,
-        status: 'ACTIVE',
       }))
     );
 
@@ -95,13 +90,15 @@ export async function gameRoutes(server: FastifyInstance) {
       lat?: string;
       lng?: string;
       radius?: string;
+      mode?: GameMode;
     };
   }>('/api/games', async (request, _reply) => {
     const lat = request.query.lat ? Number(request.query.lat) : undefined;
     const lng = request.query.lng ? Number(request.query.lng) : undefined;
     const radius = request.query.radius ? Number(request.query.radius) : undefined;
+    const mode = request.query.mode;
 
-    const games = await db.listActiveGames(lat, lng, radius);
+    const games = await db.listActiveGames(lat, lng, radius, mode);
     return {
       status: 'ok',
       games,
@@ -181,13 +178,14 @@ export async function gameRoutes(server: FastifyInstance) {
       const elapsed = Math.floor((Date.now() - new Date(game.startedAt).getTime()) / 1000);
       remainingSeconds = Math.max(game.durationSeconds - elapsed, 0);
 
-      // Auto-complete match if timer expired
+      // Auto-finalize match if timeframe expired
       if (remainingSeconds === 0) {
-        await db.updateGameStatus(id, 'COMPLETED', game.startedAt, new Date());
+        const results = await db.finalizeMatch(id);
         game.status = 'COMPLETED';
         realtimeManager.broadcastToGame(id, 'game_ended', {
           gameId: id,
           reason: 'TIMEFRAME_EXPIRED',
+          results,
         });
       }
     }
@@ -295,7 +293,7 @@ export async function gameRoutes(server: FastifyInstance) {
     };
   });
 
-  // 8. Server-Authoritative Proximity Capture Action (CONVERGENCE Loop)
+  // 8. Server-Authoritative Proximity Capture Action (Extensible Game Mode Engine)
   server.post<{
     Params: { id: string };
     Body: {
@@ -346,6 +344,14 @@ export async function gameRoutes(server: FastifyInstance) {
     const allowedRadius = objective.captureRadiusMeters + Math.min(Math.max(accuracy, 0), 12);
 
     if (distanceMeters > allowedRadius) {
+      await db.logAntiCheatIncident({
+        gameId,
+        userId: user.id,
+        incidentType: 'OUT_OF_RANGE_CAPTURE_ATTEMPT',
+        calculatedValue: distanceMeters,
+        thresholdValue: allowedRadius,
+        payload: { objectiveId, latitude, longitude, accuracy },
+      });
       return reply.status(400).send({
         error: 'OUT_OF_RANGE: Proximity verification failed',
         distanceMeters,
@@ -353,7 +359,33 @@ export async function gameRoutes(server: FastifyInstance) {
       });
     }
 
-    // 3. Kinematic check from previous telemetry
+    // 3. Pluggable Mode-Specific Rules (Phase 11)
+    const allObjectives = await db.getObjectivesByGame(gameId);
+    const modeHandler = gameModeRegistry.get(game.mode);
+    const modeValidation = modeHandler.validateCapture({
+      objective,
+      playerCoord: { latitude, longitude },
+      accuracy,
+      game,
+      player,
+      allObjectives,
+    });
+
+    if (!modeValidation.valid) {
+      await db.logAntiCheatIncident({
+        gameId,
+        userId: user.id,
+        incidentType: 'MODE_RULE_VIOLATION',
+        calculatedValue: distanceMeters,
+        thresholdValue: allowedRadius,
+        payload: { error: modeValidation.error, objectiveId, mode: game.mode },
+      });
+      return reply.status(400).send({
+        error: modeValidation.error || 'Capture validation failed',
+      });
+    }
+
+    // 4. Kinematic check from previous telemetry (Phase 10: Anti-Cheat)
     if (player.lastKnownLat !== undefined && player.lastKnownLng !== undefined && player.lastTelemetryAt) {
       const kinematic = validateKinematicSpeed(
         { latitude: player.lastKnownLat, longitude: player.lastKnownLng },
@@ -363,6 +395,14 @@ export async function gameRoutes(server: FastifyInstance) {
       );
 
       if (!kinematic.isPlausible) {
+        await db.logAntiCheatIncident({
+          gameId,
+          userId: user.id,
+          incidentType: 'SPEED_ANOMALY',
+          calculatedValue: kinematic.calculatedSpeedMps,
+          thresholdValue: 14.0,
+          payload: { latitude, longitude, prevLat: player.lastKnownLat, prevLng: player.lastKnownLng },
+        });
         return reply.status(400).send({
           error: 'TELEMETRY_ANOMALY: Impossible physical velocity detected',
           calculatedSpeedMps: kinematic.calculatedSpeedMps,
@@ -370,9 +410,10 @@ export async function gameRoutes(server: FastifyInstance) {
       }
     }
 
-    // Capture is verified authoritative by server!
+    // Authoritative capture confirmed!
+    const pointsAwarded = modeValidation.pointsAwarded || objective.points;
     const updatedObjective = await db.captureObjective(objectiveId, user.id, player.teamIndex);
-    await db.updatePlayerScore(gameId, user.id, objective.points);
+    await db.updatePlayerScore(gameId, user.id, pointsAwarded);
     await db.updatePlayerTelemetry(gameId, user.id, latitude, longitude, 0);
 
     // Record audit event
@@ -382,7 +423,7 @@ export async function gameRoutes(server: FastifyInstance) {
       {
         objectiveId,
         code: objective.code,
-        points: objective.points,
+        points: pointsAwarded,
         teamIndex: player.teamIndex,
         userId: user.id,
       },
@@ -395,30 +436,33 @@ export async function gameRoutes(server: FastifyInstance) {
       status: 'SECURED',
       capturedByTeam: player.teamIndex,
       capturedByUserId: user.id,
-      points: objective.points,
+      points: pointsAwarded,
     });
 
     realtimeManager.broadcastToGame(gameId, 'score_updated', {
       userId: user.id,
       teamIndex: player.teamIndex,
-      pointsAdded: objective.points,
+      pointsAdded: pointsAwarded,
     });
 
-    // Check if all objectives in match are secured -> trigger victory
-    const allObjectives = await db.getObjectivesByGame(gameId);
-    const allSecured = allObjectives.every((o) => o.status === 'SECURED');
-    if (allSecured) {
-      await db.updateGameStatus(gameId, 'COMPLETED', game.startedAt, new Date());
+    // Check mode-specific win condition
+    const refreshedObjectives = await db.getObjectivesByGame(gameId);
+    const refreshedPlayers = await db.getGamePlayers(gameId);
+    const winResult = modeHandler.checkWinCondition(game, refreshedObjectives, refreshedPlayers);
+
+    if (winResult.completed) {
+      const matchResults = await db.finalizeMatch(gameId);
       realtimeManager.broadcastToGame(gameId, 'game_ended', {
         gameId,
-        reason: 'ALL_OBJECTIVES_SECURED',
+        reason: winResult.reason || 'ALL_OBJECTIVES_SECURED',
+        results: matchResults,
       });
     }
 
     return {
       status: 'ok',
       objective: updatedObjective,
-      pointsAwarded: objective.points,
+      pointsAwarded,
     };
   });
 
@@ -437,4 +481,28 @@ export async function gameRoutes(server: FastifyInstance) {
 
     return { status: 'ok' };
   });
+
+  // 10. Authoritative Match Results & Progression Debrief (Phase 9)
+  server.get<{
+    Params: { id: string };
+  }>('/api/games/:id/results', async (request, reply) => {
+    const { id } = request.params;
+    const game = await db.findGameById(id);
+    if (!game) return reply.status(404).send({ error: 'Operation not found' });
+
+    let results = await db.getMatchResult(id);
+    if (!results && (game.status === 'COMPLETED' || game.status === 'ABORTED')) {
+      results = await db.finalizeMatch(id);
+    }
+
+    if (!results) {
+      return reply.status(400).send({ error: 'Match has not concluded yet' });
+    }
+
+    return {
+      status: 'ok',
+      results,
+    };
+  });
 }
+
